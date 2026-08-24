@@ -1351,6 +1351,18 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
         assert 'scientific_promotion_not_eligible' in summary['promotion_report'][
             'reason_codes'
         ]
+        report = summary['promotion_report']
+        assert report['path_encoding'] == 'runtime-relative-posix'
+        assert not Path(
+            report['generated_mask_packaging']['manifest']
+        ).is_absolute()
+        assert not Path(
+            report['box_diagnostics']['artifacts']['csv']
+        ).is_absolute()
+        assert report['promotion_evidence']['overlay_review']['status'] == (
+            'unavailable'
+        )
+        json.dumps(report, allow_nan=False)
     release_root = (
         runtime_root
         / 'derived_data/generated_masks/glomeruli/medsam_finetuned/test-run'
