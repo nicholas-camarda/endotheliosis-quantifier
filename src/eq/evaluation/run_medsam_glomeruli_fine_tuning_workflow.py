@@ -74,6 +74,16 @@ DEFAULT_OUTPUT_DIR = 'output/segmentation_evaluation/medsam_glomeruli_fine_tunin
 DEFAULT_MANIFEST_PATH = 'raw_data/cohorts/manifest.csv'
 MASK_SOURCE = 'medsam_finetuned_glomeruli'
 LOGGER = logging.getLogger('eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow')
+DEFAULT_ADOPTION_GATES = {
+    'min_dice': 0.90,
+    'min_jaccard': 0.82,
+    'max_oracle_dice_gap': 0.05,
+    'max_prompt_failures': 0,
+    'min_prediction_foreground_fraction': 0.0,
+    'max_prediction_foreground_fraction': 0.50,
+    'min_prediction_to_truth_area_ratio': 0.50,
+    'max_prediction_to_truth_area_ratio': 1.50,
+}
 
 
 def _emit(message: str) -> None:
@@ -95,6 +105,72 @@ def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     value = config.get(key, {})
     if not isinstance(value, dict):
         raise ValueError(f'{key} must be a mapping')
+    return value
+
+
+def _effective_adoption_gates(gates: dict[str, Any]) -> dict[str, Any]:
+    """Return the explicit effective gate values recorded in promotion evidence."""
+    return {**DEFAULT_ADOPTION_GATES, **gates}
+
+
+def _portable_report_value(
+    value: Any, *, runtime_root: Path, key: str = ''
+) -> Any:
+    """Encode report artifact paths relative to the declared runtime root."""
+    path_keys = {
+        'artifact_path',
+        'artifact_paths',
+        'base_checkpoint',
+        'checkpoint_path',
+        'checkpoint_files',
+        'config_path',
+        'generated_mask_path',
+        'image_path',
+        'index',
+        'inference_checkpoint_path',
+        'manifest',
+        'mask_path',
+        'masks_dir',
+        'metrics_csv',
+        'overlays_dir',
+        'paths',
+        'prompt_failures_csv',
+        'prompt_failures_json',
+        'proposal_boxes_csv',
+        'proposal_recall_csv',
+        'provenance',
+        'provenance_path',
+        'reference_mask_path',
+        'release_dir',
+        'release_manifest_path',
+        'source_image_path',
+        'split_manifest_paths',
+    }
+    if isinstance(value, dict):
+        return {
+            str(child_key): _portable_report_value(
+                child_value, runtime_root=runtime_root, key=str(child_key)
+            )
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _portable_report_value(item, runtime_root=runtime_root, key=key)
+            for item in value
+        ]
+    is_path_key = (
+        key in path_keys
+        or key.endswith(('_path', '_dir', '_csv', '_json'))
+        or key in {'csv', 'json', 'txt'}
+    )
+    if isinstance(value, str) and is_path_key:
+        if not value:
+            return ''
+        path = Path(value)
+        try:
+            return path.resolve().relative_to(runtime_root.resolve()).as_posix()
+        except ValueError:
+            return value
     return value
 
 
@@ -962,6 +1038,44 @@ def _unavailable_metric_evidence(
     return evidence
 
 
+def _shape_metric_evidence(frame: pd.DataFrame, *, label: str) -> dict[str, Any]:
+    """Summarize mask-shape evidence without turning missing columns into zeros."""
+    fields = (
+        'manual_foreground_fraction',
+        'prediction_foreground_fraction',
+        'area_ratio',
+    )
+    missing = sorted(field for field in fields if field not in frame.columns)
+    if missing:
+        return {
+            'status': 'unavailable',
+            'reason': 'Metric evidence lacks required mask-shape columns.',
+            'reason_code': f'{label}_shape_metric_columns_missing',
+            'missing_columns': missing,
+        }
+    values = frame[list(fields)].apply(pd.to_numeric, errors='coerce')
+    if values.isna().any().any() or not np.isfinite(values.to_numpy()).all():
+        return {
+            'status': 'unavailable',
+            'reason': 'Metric evidence contains missing or non-finite mask-shape values.',
+            'reason_code': f'{label}_shape_metric_values_invalid',
+        }
+    return {
+        'status': 'available',
+        'reason': '',
+        'reason_code': '',
+        'sample_count': int(len(values)),
+        'metrics': {
+            field: {
+                'min': float(values[field].min()),
+                'max': float(values[field].max()),
+                'mean': float(values[field].mean()),
+            }
+            for field in fields
+        },
+    }
+
+
 def _metric_evidence_provenance(source: dict[str, Any]) -> dict[str, Any] | None:
     run_id = str(source.get('run_id', '')).strip()
     fixed_split = str(source.get('fixed_split', '')).strip()
@@ -1120,6 +1234,7 @@ def _load_metric_evidence(
             'dice': float(aggregate['dice']),
             'jaccard': float(aggregate['jaccard']),
         },
+        'shape_metrics': _shape_metric_evidence(normalized_frame, label=label),
     }
 
 
@@ -1133,7 +1248,7 @@ def _build_finetuned_comparison_summary(
     expected_provenance = _metric_evidence_provenance(finetuned_evaluation)
     metric_evidence = {
         'fine_tuned': _load_metric_evidence(
-            finetuned_evaluation.get('metrics_csv', ''),
+        finetuned_evaluation.get('metrics_csv', ''),
             label='fine_tuned',
             aggregation='mean',
             provenance_source=finetuned_evaluation,
@@ -1264,6 +1379,9 @@ def _build_finetuned_comparison_summary(
             finetuned_evaluation.get('prompt_failure_count', 0) or 0
         ),
         gates=adoption_gates,
+        fine_tuned_shape_metrics=metric_evidence['fine_tuned'].get(
+            'shape_metrics'
+        ),
         overlay_review_status='passed'
         if str(finetuned_evaluation.get('overlay_review_status', '')) == 'passed'
         else 'not_run',
@@ -1272,8 +1390,6 @@ def _build_finetuned_comparison_summary(
         {
             'status': 'completed',
             'reason': '',
-            'reason_codes': [],
-            'failed_gates': [],
             'metric_evidence': metric_evidence,
         }
     )
@@ -1290,6 +1406,7 @@ def _classify_generated_mask_adoption(
     prompt_failure_count: int,
     gates: dict[str, Any],
     overlay_review_status: str,
+    fine_tuned_shape_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fine_dice = _mean_metric(fine_tuned_metrics, 'dice')
     fine_jaccard = _mean_metric(fine_tuned_metrics, 'jaccard')
@@ -1303,6 +1420,73 @@ def _classify_generated_mask_adoption(
         and str(overlay_review_status) == 'passed'
         and beats_trivial
     )
+    shape_gate_reasons: list[str] = []
+    shape_gate_observed: dict[str, Any] = {}
+    shape_gates_configured = any(
+        key in gates
+        for key in (
+            'min_prediction_foreground_fraction',
+            'max_prediction_foreground_fraction',
+            'min_prediction_to_truth_area_ratio',
+            'max_prediction_to_truth_area_ratio',
+        )
+    )
+    if shape_gates_configured:
+        if not isinstance(fine_tuned_shape_metrics, dict) or str(
+            fine_tuned_shape_metrics.get('status', '')
+        ) != 'available':
+            shape_gate_reasons.append('fine_tuned_shape_metric_evidence_unavailable')
+        else:
+            shape_values = fine_tuned_shape_metrics.get('metrics', {})
+            shape_gate_observed = dict(shape_values)
+            checks = (
+                (
+                    'prediction_foreground_fraction',
+                    'min_prediction_foreground_fraction',
+                    0.0,
+                    'prediction_foreground_fraction_below_gate',
+                    'min',
+                    '>=',
+                ),
+                (
+                    'prediction_foreground_fraction',
+                    'max_prediction_foreground_fraction',
+                    1.0,
+                    'prediction_foreground_fraction_above_gate',
+                    'max',
+                    '<=',
+                ),
+                (
+                    'area_ratio',
+                    'min_prediction_to_truth_area_ratio',
+                    0.5,
+                    'prediction_to_truth_area_ratio_below_gate',
+                    'min',
+                    '>=',
+                ),
+                (
+                    'area_ratio',
+                    'max_prediction_to_truth_area_ratio',
+                    1.5,
+                    'prediction_to_truth_area_ratio_above_gate',
+                    'max',
+                    '<=',
+                ),
+            )
+            for metric_name, gate_name, default, reason_code, observed_key, comparator in checks:
+                metric_record = shape_values.get(metric_name, {})
+                if not isinstance(metric_record, dict) or observed_key not in metric_record:
+                    shape_gate_reasons.append(
+                        f'fine_tuned_{metric_name}_evidence_unavailable'
+                    )
+                    continue
+                observed = float(metric_record[observed_key])
+                threshold = float(gates.get(gate_name, default))
+                passed = observed >= threshold if comparator == '>=' else observed <= threshold
+                if not passed:
+                    shape_gate_reasons.append(reason_code)
+    shape_gate_passed = not shape_gate_reasons
+    reliability_passed = reliability_passed and shape_gate_passed
     oracle_level = (
         fine_dice >= float(gates.get('min_dice', 0.90))
         and fine_jaccard >= float(gates.get('min_jaccard', 0.82))
@@ -1326,6 +1510,28 @@ def _classify_generated_mask_adoption(
             failure_mode = 'prompt_geometry'
         if not beats_trivial:
             failure_mode = 'training_quality'
+        if shape_gate_reasons:
+            failure_mode = 'prediction_shape'
+    reason_codes: list[str] = []
+    failed_gates: list[dict[str, Any]] = []
+    if not oracle_level:
+        reason_codes.append('oracle_level_gates_failed')
+        failed_gates.append(
+            {
+                'gate': 'oracle_level_metrics',
+                'reason_code': 'oracle_level_gates_failed',
+                'reason': 'Fine-tuned automatic metrics did not clear oracle-level thresholds.',
+            }
+        )
+    for reason_code in shape_gate_reasons:
+        reason_codes.append(reason_code)
+        failed_gates.append(
+            {
+                'gate': 'prediction_shape',
+                'reason_code': reason_code,
+                'reason': 'Fine-tuned automatic mask-shape evidence did not clear configured gates.',
+            }
+        )
     return {
         'adoption_tier': adoption_tier,
         'primary_generated_mask_transition_status': adoption_tier,
@@ -1335,8 +1541,47 @@ def _classify_generated_mask_adoption(
         'improves_current_auto': bool(improves_auto),
         'improves_current_segmenter': bool(improves_segmenter),
         'beats_trivial_baseline': bool(beats_trivial),
+        'shape_gate_passed': bool(shape_gate_passed),
+        'shape_gate_observed': shape_gate_observed,
         'failure_mode': failure_mode,
+        'reason_codes': reason_codes,
+        'failed_gates': failed_gates,
     }
+
+
+def _promotion_evidence_summary(
+    config: dict[str, Any], runtime_root: Path
+) -> dict[str, Any]:
+    """Resolve explicit human/downstream evidence used by scientific promotion."""
+    evidence_cfg = _mapping(config, 'promotion_evidence')
+    records: dict[str, Any] = {}
+    for key in (
+        'overlay_review',
+        'downstream_grading_stability',
+        'nondegenerate_prediction_review',
+    ):
+        raw_record = evidence_cfg.get(key, {})
+        record = raw_record if isinstance(raw_record, dict) else {}
+        status = str(record.get('status', 'unavailable')).strip() or 'unavailable'
+        raw_path = str(record.get('artifact_path', '')).strip()
+        resolved_path = _runtime_path(runtime_root, raw_path) if raw_path else None
+        reason_code = ''
+        reason = ''
+        if status != 'passed':
+            reason_code = f'{key}_not_passed'
+            reason = f'{key} status is {status!r}, not passed.'
+        elif resolved_path is None or not resolved_path.is_file():
+            reason_code = f'{key}_artifact_unavailable'
+            reason = f'{key} requires a readable artifact path.'
+        artifact_hash = _file_hash(resolved_path) if resolved_path is not None else ''
+        records[key] = {
+            'status': status,
+            'artifact_path': str(resolved_path) if resolved_path is not None else '',
+            'sha256': artifact_hash,
+            'reason': reason,
+            'reason_code': reason_code,
+        }
+    return records
 
 
 def _release_manifest_fields() -> list[str]:
@@ -1904,7 +2149,9 @@ def _run_finetuned_fixed_split_evaluation(
             'proposal_boxes_csv': str(proposal_boxes_csv),
             'proposal_recall_csv': str(proposal_recall_csv),
             'prompt_failure_count': prompt_failure_count,
-            'overlay_review_status': 'passed' if status == 'completed' else 'not_run',
+            'overlay_review_status': 'not_reviewed'
+            if status == 'completed'
+            else 'not_run',
         }
     )
     return summary
@@ -2449,6 +2696,12 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         dry_run=dry_run,
     )
     finetuned_evaluation.update(metric_evidence_context)
+    promotion_evidence = _promotion_evidence_summary(config, runtime_root)
+    if (
+        str(promotion_evidence['overlay_review'].get('status', '')) == 'passed'
+        and str(promotion_evidence['overlay_review'].get('sha256', ''))
+    ):
+        finetuned_evaluation['overlay_review_status'] = 'passed'
     box_diagnostics = write_medsam_box_diagnostics(
         fixed_rows,
         proposal_boxes_path=finetuned_evaluation.get('proposal_boxes_csv', ''),
@@ -2462,7 +2715,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         ),
         selected_threshold=finetuned_evaluation.get('selected_threshold'),
     )
-    adoption_gates = _mapping(config, 'adoption_gates')
+    adoption_gates = _effective_adoption_gates(_mapping(config, 'adoption_gates'))
     finetuned_comparison = _build_finetuned_comparison_summary(
         finetuned_evaluation=finetuned_evaluation,
         external_baselines_summary=external_baselines_summary,
@@ -2483,11 +2736,6 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'oracle_level_preferred',
         'improved_candidate_not_oracle',
     } and not bool(dataset_split_audit.get('promotion_blocked', False))
-    scientific_promotion_eligible = (
-        comparison_eligible
-        and str(finetuned_comparison.get('adoption_tier', ''))
-        == 'oracle_level_preferred'
-    )
     if packaging_inputs_ready and not comparison_eligible:
         generated_mask_packaging = {
             'status': 'skipped_comparison_not_eligible',
@@ -2559,6 +2807,52 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 'status': 'skipped_no_prediction_masks',
                 'masks_dir': str(masks_eval_dir),
             }
+    inference_checkpoint_path = Path(
+        str(finetuned_evaluation.get('checkpoint_path', '')).strip()
+    )
+    inference_checkpoint_hash = _file_hash(inference_checkpoint_path)
+    promotion_evidence_failures = [
+        {
+            'gate': key,
+            'reason_code': str(record.get('reason_code', '')),
+            'reason': str(record.get('reason', '')),
+        }
+        for key, record in promotion_evidence.items()
+        if record.get('reason_code')
+    ]
+    if not inference_checkpoint_hash:
+        promotion_evidence_failures.append(
+            {
+                'gate': 'inference_checkpoint',
+                'reason_code': 'inference_checkpoint_artifact_unavailable',
+                'reason': 'The exact checkpoint used for inference is missing or unreadable.',
+            }
+        )
+    if str(generated_mask_packaging.get('status', '')) != 'completed':
+        promotion_evidence_failures.append(
+            {
+                'gate': 'generated_mask_release',
+                'reason_code': 'generated_mask_release_provenance_unavailable',
+                'reason': 'Scientific promotion requires a completed generated-mask release.',
+            }
+        )
+    scientific_promotion_eligible = (
+        comparison_eligible
+        and str(finetuned_comparison.get('adoption_tier', ''))
+        == 'oracle_level_preferred'
+        and not promotion_evidence_failures
+    )
+    practical_adoption_decision = (
+        'package_candidate'
+        if str(generated_mask_packaging.get('status', '')) == 'completed'
+        and str(finetuned_comparison.get('adoption_tier', ''))
+        == 'improved_candidate_not_oracle'
+        else (
+            'candidate_eligible_not_packaged'
+            if comparison_eligible
+            else 'blocked'
+        )
+    )
     checkpoint_hashes = {
         str(path): _file_hash(Path(str(path)))
         for path in checkpoint_provenance.get('checkpoint_files', [])
@@ -2568,6 +2862,11 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         {
             *dataset_split_audit.get('blocking_reason_codes', []),
             *finetuned_comparison.get('reason_codes', []),
+            *[
+                str(failure.get('reason_code', ''))
+                for failure in promotion_evidence_failures
+                if failure.get('reason_code')
+            ],
             *([] if comparison_eligible else ['comparison_not_eligible']),
             *(
                 []
@@ -2595,24 +2894,51 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 'reason': 'Automatic evidence did not satisfy the scientific promotion contract.',
             }
         )
+    failed_gates.extend(promotion_evidence_failures)
     base_checkpoint_hash = (
         _file_hash(Path(str(preflight['base_checkpoint'])))
         if Path(str(preflight.get('base_checkpoint', ''))).is_file()
         else ''
     )
     evaluation_created_at = datetime.now().isoformat(timespec='seconds')
+    portable_checkpoint_hashes = {
+        str(
+            _portable_report_value(
+                path, runtime_root=runtime_root, key='checkpoint_path'
+            )
+        ): digest
+        for path, digest in checkpoint_hashes.items()
+    }
     promotion_report = {
         'schema_version': 'eq.medsam.promotion-report/1',
+        'path_encoding': RUNTIME_RELATIVE_POSIX_ENCODING,
+        'runtime_root': str(runtime_root),
         'evaluation': {
             'run_id': str(run_cfg.get('name') or DEFAULT_RUN_ID),
             'created_at': evaluation_created_at,
-            'config_path': str(config_path),
+            'config_path': _portable_report_value(
+                str(config_path), runtime_root=runtime_root, key='config_path'
+            ),
         },
         'checkpoint': {
             'checkpoint_id': str(outputs.get('checkpoint_id') or run_cfg.get('name') or ''),
-            'checkpoint_files': list(checkpoint_provenance.get('checkpoint_files', [])),
-            'checkpoint_sha256': checkpoint_hashes,
-            'base_checkpoint': str(preflight.get('base_checkpoint', '')),
+            'checkpoint_files': _portable_report_value(
+                list(checkpoint_provenance.get('checkpoint_files', [])),
+                runtime_root=runtime_root,
+                key='checkpoint_files',
+            ),
+            'checkpoint_sha256': portable_checkpoint_hashes,
+            'inference_checkpoint_path': _portable_report_value(
+                str(inference_checkpoint_path),
+                runtime_root=runtime_root,
+                key='inference_checkpoint_path',
+            ),
+            'inference_checkpoint_sha256': inference_checkpoint_hash,
+            'base_checkpoint': _portable_report_value(
+                str(preflight.get('base_checkpoint', '')),
+                runtime_root=runtime_root,
+                key='base_checkpoint',
+            ),
             'base_checkpoint_sha256': base_checkpoint_hash,
         },
         'split_manifests': {
@@ -2620,37 +2946,64 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 key: f'{key}:{split_hashes.get(key, "")}'
                 for key in sorted(split_paths)
             },
-            'paths': split_paths,
+            'paths': {
+                key: _portable_report_value(
+                    value, runtime_root=runtime_root, key='artifact_path'
+                )
+                for key, value in split_paths.items()
+            },
             'sha256': split_hashes,
         },
-        'dataset_audit': {
-            'id': str(dataset_split_audit.get('audit_sha256', '')),
-            'sha256': str(dataset_split_audit.get('audit_sha256', '')),
-            'artifacts': dataset_split_audit.get('artifacts', {}),
+        'dataset_audit': _portable_report_value(
+            {
+                'id': str(dataset_split_audit.get('audit_sha256', '')),
+                'sha256': str(dataset_split_audit.get('audit_sha256', '')),
+                'artifacts': dataset_split_audit.get('artifacts', {}),
+            },
+            runtime_root=runtime_root,
+        ),
+        'box_diagnostics': _portable_report_value(
+            box_diagnostics, runtime_root=runtime_root
+        ),
+        'preprocessing_prompt_config': _portable_report_value(
+            {
+                'training_image_size': training_cfg.get('image_size', ''),
+                'tiling': _mapping(config, 'tiling'),
+                'proposal': _mapping(config, 'proposal'),
+                'selected_candidate_family': finetuned_evaluation.get(
+                    'selected_candidate_family', ''
+                ),
+                'selected_threshold': finetuned_evaluation.get('selected_threshold'),
+            },
+            runtime_root=runtime_root,
+        ),
+        'metric_artifacts': _portable_report_value(
+            finetuned_comparison.get('metric_evidence', {}),
+            runtime_root=runtime_root,
+        ),
+        'promotion_evidence': _portable_report_value(
+            promotion_evidence, runtime_root=runtime_root
+        ),
+        'thresholds': {
+            'adoption_gates': adoption_gates,
+            'current_segmenter_comparison_threshold': _mapping(
+                config, 'current_segmenter'
+            ).get('comparison_threshold'),
         },
-        'box_diagnostics': box_diagnostics,
-        'preprocessing_prompt_config': {
-            'training_image_size': training_cfg.get('image_size', ''),
-            'tiling': _mapping(config, 'tiling'),
-            'proposal': _mapping(config, 'proposal'),
-            'selected_candidate_family': finetuned_evaluation.get(
-                'selected_candidate_family', ''
-            ),
-            'selected_threshold': finetuned_evaluation.get('selected_threshold'),
-        },
-        'metric_artifacts': finetuned_comparison.get('metric_evidence', {}),
-        'thresholds': adoption_gates,
         'failed_gates': failed_gates,
         'reason_codes': promotion_reason_codes,
         'decision': 'promote' if scientific_promotion_eligible else 'blocked',
-        'practical_adoption_decision': (
-            'package_candidate' if comparison_eligible else 'blocked'
+        'practical_adoption_decision': practical_adoption_decision,
+        'generated_mask_packaging': _portable_report_value(
+            generated_mask_packaging, runtime_root=runtime_root
         ),
-        'generated_mask_packaging': generated_mask_packaging,
     }
     promotion_report_path = paths['evaluation_dir'] / 'promotion_report.json'
     promotion_report_path.write_text(
-        json.dumps(promotion_report, indent=2, sort_keys=True), encoding='utf-8'
+        json.dumps(
+            promotion_report, indent=2, sort_keys=True, allow_nan=False
+        ),
+        encoding='utf-8',
     )
     summary = {
         'workflow': WORKFLOW_ID,

@@ -137,7 +137,10 @@ identifies the evaluation run and timestamp, checkpoint ID and hashes, split
 manifest IDs and hashes, dataset-audit ID/hash, automatic-box diagnostic
 artifacts, preprocessing and prompt configuration, automatic/oracle metric
 artifacts, configured thresholds, failed gates, reason codes, and the final
-promotion decision.
+promotion decision. It SHALL identify the exact checkpoint artifact used for
+inference, its SHA-256 hash, the generated-mask release provenance, and the
+status and SHA-256 hash of explicit overlay review, downstream grading
+stability, and non-degenerate prediction review evidence.
 
 #### Scenario: Promotion is blocked
 - **WHEN** metric evidence, split/audit evidence, or scientific promotion gates
@@ -146,7 +149,24 @@ promotion decision.
   failed-gate evidence, and SHALL NOT represent practical candidate packaging
   as scientific promotion
 
+#### Scenario: Scientific promotion evidence is incomplete
+- **WHEN** automatic metrics meet the configured segmentation thresholds
+
+- **AND** any required downstream grading, non-degenerate prediction review,
+  overlay review, exact inference-checkpoint, or generated-mask release
+  evidence is unavailable or not passed
+- **THEN** the promotion report SHALL set `decision=blocked`
+- **AND** it SHALL record the missing evidence as a failed gate with a reason
+  code
+- **AND** it SHALL NOT infer a passed review from generated overlays or a
+  completed inference run
+
 #### Scenario: Promotion evidence is inspected
 - **WHEN** a completed evaluation summary is consumed
 - **THEN** it SHALL reference the same promotion report and the report's
   artifact IDs/hashes SHALL identify the exact evidence used for the decision
+
+- **AND** `decision=promote` SHALL require a completed generated-mask release
+  and `status=passed` evidence records with readable hashed artifacts for
+  overlay review, downstream grading stability, and non-degenerate prediction
+  review

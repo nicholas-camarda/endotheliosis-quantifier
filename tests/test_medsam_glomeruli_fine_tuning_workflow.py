@@ -508,6 +508,39 @@ def test_adoption_gate_distinguishes_oracle_level_candidate_and_blocked():
     assert blocked['failure_mode'] == 'oracle_gap'
 
 
+def test_adoption_gate_blocks_shape_overcoverage_even_when_metrics_clear():
+    result = _classify_generated_mask_adoption(
+        fine_tuned_metrics={'dice': 0.91, 'jaccard': 0.84},
+        oracle_metrics={'dice': 0.94, 'jaccard': 0.86},
+        current_auto_metrics={'dice': 0.78, 'jaccard': 0.64},
+        current_segmenter_metrics={'dice': 0.72, 'jaccard': 0.58},
+        trivial_baseline_metrics={'dice': 0.20, 'jaccard': 0.12},
+        prompt_failure_count=0,
+        gates={
+            'min_dice': 0.90,
+            'min_jaccard': 0.82,
+            'max_oracle_dice_gap': 0.05,
+            'max_prompt_failures': 0,
+            'min_prediction_foreground_fraction': 0.0,
+            'max_prediction_foreground_fraction': 0.50,
+            'min_prediction_to_truth_area_ratio': 0.50,
+            'max_prediction_to_truth_area_ratio': 1.50,
+        },
+        overlay_review_status='passed',
+        fine_tuned_shape_metrics={
+            'status': 'available',
+            'metrics': {
+                'prediction_foreground_fraction': {'min': 0.05, 'max': 0.10},
+                'area_ratio': {'min': 0.8, 'max': 2.1},
+            },
+        },
+    )
+
+    assert result['adoption_tier'] == 'blocked'
+    assert result['shape_gate_passed'] is False
+    assert 'prediction_to_truth_area_ratio_above_gate' in result['reason_codes']
+
+
 def _package_portable_release(runtime_root: Path) -> tuple[dict[str, Path], Path]:
     run_mask = runtime_root / 'run/masks/row-1.png'
     _write_png(run_mask, np.ones((4, 4), dtype=np.uint8))
@@ -1279,7 +1312,7 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
     assert 'prompt_failure_count' in finetuned
     assert 'prompt_failures_csv' in finetuned
     assert 'prompt_failures_json' in finetuned
-    assert finetuned['overlay_review_status'] == 'passed'
+    assert finetuned['overlay_review_status'] == 'not_reviewed'
     assert Path(finetuned['metrics_csv']).exists()
     assert Path(finetuned['prompt_failures_csv']).exists()
     assert Path(finetuned['proposal_boxes_csv']).exists()
