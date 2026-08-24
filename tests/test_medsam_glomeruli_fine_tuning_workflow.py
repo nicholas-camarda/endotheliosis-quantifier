@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow import (
+    _admitted_manual_rows,
     _baseline_metric_rows,
     _build_adaptation_command,
     _build_checkpoint_provenance,
@@ -83,6 +84,35 @@ def test_fixed_split_generation_keeps_source_groups_together():
     assert set(split['split']) == {'train', 'validation', 'test'}
     assert 'selection_rank' in split.columns
     assert 'selection_reason' in split.columns
+
+
+def test_audit_admission_view_retains_blank_artifact_paths(tmp_path: Path):
+    manifest = pd.DataFrame(
+        [
+            {
+                'manifest_row_id': 'row-missing',
+                'admission_status': 'admitted',
+                'lane_assignment': 'manual_mask_core',
+                'cohort_id': 'demo',
+                'source_sample_id': 'sample-missing',
+                'image_path': '',
+                'mask_path': '',
+            }
+        ]
+    )
+
+    audit_view = _admitted_manual_rows(
+        manifest,
+        tmp_path,
+        lane_assignments=['manual_mask_core'],
+        include_missing_files=True,
+    )
+    split_view = _admitted_manual_rows(
+        manifest, tmp_path, lane_assignments=['manual_mask_core']
+    )
+
+    assert audit_view['manifest_row_id'].tolist() == ['row-missing']
+    assert split_view.empty
 
 
 def test_explicit_split_manifest_validation_hashes_required_paths(tmp_path: Path):
@@ -1274,6 +1304,13 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
             comparison_override['oracle_dice_gap']
         )
     assert summary['generated_mask_packaging']['status'] == expected_packaging_status
+    if comparison_override is not None and comparison_override['adoption_tier'] == (
+        'improved_candidate_not_oracle'
+    ):
+        assert summary['promotion_status'] == 'blocked'
+        assert 'scientific_promotion_not_eligible' in summary[
+            'promotion_reason_codes'
+        ]
     release_root = (
         runtime_root
         / 'derived_data/generated_masks/glomeruli/medsam_finetuned/test-run'

@@ -173,18 +173,18 @@ def _admitted_manual_rows(
     eligible = frame[
         (frame['admission_status'].astype(str) == 'admitted')
         & frame['lane_assignment'].astype(str).isin(lane_assignments)
-        & frame['image_path'].astype(str).str.strip().ne('')
-        & frame['mask_path'].astype(str).str.strip().ne('')
     ].copy()
     eligible['image_path_resolved'] = eligible['image_path'].map(
-        lambda p: str(_runtime_path(runtime_root, p))
+        lambda p: str(_runtime_path(runtime_root, p)) if str(p).strip() else ''
     )
     eligible['mask_path_resolved'] = eligible['mask_path'].map(
-        lambda p: str(_runtime_path(runtime_root, p))
+        lambda p: str(_runtime_path(runtime_root, p)) if str(p).strip() else ''
     )
     if not include_missing_files:
         eligible = eligible[
-            eligible['image_path_resolved'].map(lambda p: Path(p).exists())
+            eligible['image_path'].astype(str).str.strip().ne('')
+            & eligible['mask_path'].astype(str).str.strip().ne('')
+            & eligible['image_path_resolved'].map(lambda p: Path(p).exists())
             & eligible['mask_path_resolved'].map(lambda p: Path(p).exists())
         ].copy()
     eligible['split_group_id'] = eligible.apply(_strongest_group_id, axis=1)
@@ -2469,6 +2469,11 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'oracle_level_preferred',
         'improved_candidate_not_oracle',
     } and not bool(dataset_split_audit.get('promotion_blocked', False))
+    scientific_promotion_eligible = (
+        comparison_eligible
+        and str(finetuned_comparison.get('adoption_tier', ''))
+        == 'oracle_level_preferred'
+    )
     if packaging_inputs_ready and not comparison_eligible:
         generated_mask_packaging = {
             'status': 'skipped_comparison_not_eligible',
@@ -2589,12 +2594,19 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'split_manifest_hashes': split_hashes,
         'generated_splits': generated_splits,
         'dataset_split_audit': dataset_split_audit,
-        'promotion_status': 'eligible' if comparison_eligible else 'blocked',
+        'promotion_status': (
+            'eligible' if scientific_promotion_eligible else 'blocked'
+        ),
         'promotion_reason_codes': sorted(
             {
                 *dataset_split_audit.get('blocking_reason_codes', []),
                 *finetuned_comparison.get('reason_codes', []),
                 *([] if comparison_eligible else ['comparison_not_eligible']),
+                *(
+                    []
+                    if scientific_promotion_eligible
+                    else ['scientific_promotion_not_eligible']
+                ),
             }
         ),
         'finetuned_evaluation': finetuned_evaluation,
