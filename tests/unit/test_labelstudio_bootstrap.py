@@ -710,9 +710,9 @@ def test_labelstudio_demo_cli_forwards_live_export_only(
 
 
 def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
-    images = tmp_path / 'images'
-    img = _write_image(images / 'animal_1' / 'a.png')
     runtime = tmp_path / 'runtime'
+    images = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images'
+    img = _write_image(images / 'animal_1' / 'a.png')
     mask_dir = (
         runtime
         / 'derived_data'
@@ -725,8 +725,7 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     mask_dir.mkdir(parents=True, exist_ok=True)
     mask_path = mask_dir / 'mask_a.png'
     Image.new('L', (2, 2), color=255).save(mask_path)
-    source_image = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images' / img.name
-    _write_image(source_image)
+    source_image = img
     manifest_dir = runtime / 'derived_data' / 'generated_masks' / 'glomeruli'
     manifest_dir.mkdir(parents=True, exist_ok=True)
     relative_mask_path = mask_path.relative_to(runtime).as_posix()
@@ -800,9 +799,10 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
 def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    images = tmp_path / 'images'
-    img = _write_real_png(images / 'animal_1' / 'a.png')
     runtime = tmp_path / 'runtime'
+    images = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images'
+    img = _write_real_png(images / 'animal_1' / 'a.png')
+    img_b = _write_real_png(images / 'animal_2' / 'a.png', value=200)
     release_dir = (
         runtime
         / 'derived_data'
@@ -813,13 +813,16 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
     )
     mask_path = release_dir / 'masks' / 'mask_a.png'
     _write_real_png(mask_path, value=255)
-    source_image = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images' / img.name
-    _write_real_png(source_image)
+    source_image = img
+    source_image_b = img_b
+    mask_path_b = release_dir / 'masks' / 'mask_b.png'
+    _write_real_png(mask_path_b, value=220)
     registry_path = (
         runtime / 'derived_data' / 'generated_masks' / 'glomeruli' / 'manifest.csv'
     )
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     relative_mask = 'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/masks/mask_a.png'
+    relative_mask_b = 'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/masks/mask_b.png'
     relative_manifest = (
         'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/manifest.csv'
     )
@@ -836,6 +839,7 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
             [
                 fields,
                 f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row2,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample2,{source_image_b.relative_to(runtime).as_posix()},,{relative_mask_b},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
             ]
         ),
         encoding='utf-8',
@@ -845,6 +849,7 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
             [
                 fields,
                 f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row2,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample2,{source_image_b.relative_to(runtime).as_posix()},,{relative_mask_b},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
             ]
         ),
         encoding='utf-8',
@@ -878,7 +883,11 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
     )
 
     tasks = json.loads(result.task_manifest_path.read_text(encoding='utf-8'))
-    assert tasks[0]['data']['preload_prediction_status'] == 'available'
+    assert len(tasks) == 2
+    assert [task['data']['preload_prediction_status'] for task in tasks] == [
+        'available',
+        'available',
+    ]
 
 
 def test_hybrid_preload_rejects_stale_absolute_release_manifest_paths(tmp_path: Path):

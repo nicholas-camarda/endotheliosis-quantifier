@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -162,6 +162,7 @@ def audit_medsam_evaluation_cohort(
         'images': defaultdict(set),
         'manifest_rows': defaultdict(set),
     }
+    manifest_rows_by_split: dict[str, list[str]] = defaultdict(list)
     row_audit: list[dict[str, Any]] = []
     foreground_pixels: list[int] = []
     positive_rows = 0
@@ -279,6 +280,7 @@ def audit_medsam_evaluation_cohort(
                 split_values['images'][str(image_path)].add(split)
             if row_id:
                 split_values['manifest_rows'][row_id].add(split)
+                manifest_rows_by_split[split].append(row_id)
         row_audit.append(
             {
                 'manifest_row_id': row_id,
@@ -327,6 +329,25 @@ def audit_medsam_evaluation_cohort(
     for key, reason_code in overlap_reason_codes.items():
         for value in overlap[key]['values']:
             _issue(issues, reason_code=reason_code, value=value)
+
+    duplicate_manifest_rows_by_split = {
+        split: sorted(
+            row_id
+            for row_id, count in Counter(row_ids).items()
+            if count > 1
+        )
+        for split, row_ids in manifest_rows_by_split.items()
+        if any(count > 1 for count in Counter(row_ids).values())
+    }
+    for split, row_ids in duplicate_manifest_rows_by_split.items():
+        for row_id in row_ids:
+            _issue(
+                issues,
+                reason_code='duplicate_manifest_row_id_within_split',
+                row_id=row_id,
+                field='split',
+                value=split,
+            )
 
     if foreground_pixels and background_rows == 0:
         _issue(issues, reason_code='positive_only_evidence_distribution_limitation')
@@ -392,6 +413,7 @@ def audit_medsam_evaluation_cohort(
             },
         },
         'cross_split_overlap': overlap,
+        'duplicate_manifest_rows_by_split': duplicate_manifest_rows_by_split,
         'independence_status': independence_status,
         'promotion_blocked': bool(blocking_codes),
         'blocking_reason_codes': sorted(blocking_codes),

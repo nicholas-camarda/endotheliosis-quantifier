@@ -17,6 +17,7 @@ _RELEASE_ROW_PATH_FIELDS = (
     'checkpoint_path',
     'provenance_path',
     'release_manifest_path',
+    'metric_evidence_path',
 )
 _GENERATED_RELEASE_REQUIRED_PATH_FIELDS = frozenset(
     {
@@ -151,7 +152,9 @@ def _validate_provenance_document(
         raise ArtifactProvenanceError(
             'Generated-mask provenance document has unsupported path_encoding'
         )
-    for field in ('checkpoint_path', 'manifest_path'):
+    for field in ('checkpoint_path', 'manifest_path', 'metric_evidence_path'):
+        if field == 'metric_evidence_path' and not str(payload.get(field) or '').strip():
+            continue
         resolve_runtime_relative_path(
             str(payload.get(field) or ''),
             runtime_root=runtime_root,

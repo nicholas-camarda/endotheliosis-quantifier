@@ -55,6 +55,7 @@ baseline_evaluation:
   automatic_medsam: true
   oracle_prompt_medsam: true
   current_segmenter: true
+  oracle_metrics_csv: output/segmentation_evaluation/medsam_glomeruli_fine_tuning/pilot_medsam_glomeruli_fine_tuning/baseline_metrics/oracle_medsam_metrics.csv
 
 tiling:
   tile_size: 512

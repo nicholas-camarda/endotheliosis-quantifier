@@ -108,6 +108,13 @@ def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def _configured_oracle_metrics_path(
+    baseline_evaluation: dict[str, Any], runtime_root: Path
+) -> Path | None:
+    configured = str(baseline_evaluation.get('oracle_metrics_csv', '')).strip()
+    return _runtime_path(runtime_root, configured) if configured else None
+
+
 def _effective_adoption_gates(gates: dict[str, Any]) -> dict[str, Any]:
     """Return the explicit effective gate values recorded in promotion evidence."""
     return {**DEFAULT_ADOPTION_GATES, **gates}
@@ -170,7 +177,11 @@ def _portable_report_value(
         try:
             return path.resolve().relative_to(runtime_root.resolve()).as_posix()
         except ValueError:
-            return value
+            return {
+                'path': value,
+                'path_encoding': 'external-absolute',
+                'reason': 'outside_runtime_root',
+            }
     return value
 
 
@@ -1550,7 +1561,12 @@ def _classify_generated_mask_adoption(
 
 
 def _promotion_evidence_summary(
-    config: dict[str, Any], runtime_root: Path
+    config: dict[str, Any],
+    runtime_root: Path,
+    *,
+    expected_run_id: str,
+    expected_fixed_split: str,
+    expected_checkpoint_sha256: str,
 ) -> dict[str, Any]:
     """Resolve explicit human/downstream evidence used by scientific promotion."""
     evidence_cfg = _mapping(config, 'promotion_evidence')
@@ -1573,6 +1589,28 @@ def _promotion_evidence_summary(
         elif resolved_path is None or not resolved_path.is_file():
             reason_code = f'{key}_artifact_unavailable'
             reason = f'{key} requires a readable artifact path.'
+        else:
+            try:
+                payload = json.loads(resolved_path.read_text(encoding='utf-8'))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            identity_matches = isinstance(payload, dict) and all(
+                (
+                    payload.get('schema_version')
+                    == 'eq.medsam.promotion-evidence/1',
+                    payload.get('evidence_kind') == key,
+                    payload.get('status') == 'passed',
+                    payload.get('evaluation_run_id') == expected_run_id,
+                    payload.get('fixed_split') == expected_fixed_split,
+                    payload.get('checkpoint_sha256') == expected_checkpoint_sha256,
+                )
+            )
+            if not identity_matches:
+                reason_code = f'{key}_artifact_identity_invalid'
+                reason = (
+                    f'{key} artifact is not bound to this evaluation run, fixed split, '
+                    'checkpoint, and evidence schema.'
+                )
         artifact_hash = _file_hash(resolved_path) if resolved_path is not None else ''
         records[key] = {
             'status': status,
@@ -1605,6 +1643,9 @@ def _release_manifest_fields() -> list[str]:
         'run_id',
         'generation_status',
         'provenance_path',
+        'checkpoint_sha256',
+        'metric_evidence_path',
+        'metric_evidence_sha256',
     ]
 
 
@@ -1620,6 +1661,9 @@ def _package_generated_mask_release(
     proposal_threshold: float,
     adoption_tier: str,
     generated_masks: list[dict[str, Any]],
+    checkpoint_sha256: str = '',
+    metric_evidence_path: str = '',
+    metric_evidence_sha256: str = '',
 ) -> dict[str, Path]:
     runtime_root = Path(runtime_root).expanduser().resolve()
     ensure_not_under_runtime_raw_data(release_dir, runtime_root)
@@ -1672,6 +1716,11 @@ def _package_generated_mask_release(
                 'provenance_path': serialize_runtime_relative_path(
                     provenance_path, runtime_root=runtime_root
                 ),
+                'checkpoint_sha256': checkpoint_sha256,
+                'metric_evidence_path': _serialize_optional_runtime_path(
+                    metric_evidence_path, runtime_root=runtime_root
+                ),
+                'metric_evidence_sha256': metric_evidence_sha256,
             }
         )
     manifest_path = release_dir / 'manifest.csv'
@@ -1687,8 +1736,13 @@ def _package_generated_mask_release(
         'run_id': run_id,
         'checkpoint_id': checkpoint_id,
         'checkpoint_path': checkpoint_path_serialized,
+        'checkpoint_sha256': checkpoint_sha256,
         'proposal_source': proposal_source,
         'proposal_threshold': float(proposal_threshold),
+        'metric_evidence_path': _serialize_optional_runtime_path(
+            metric_evidence_path, runtime_root=runtime_root
+        ),
+        'metric_evidence_sha256': metric_evidence_sha256,
         'manifest_path': serialize_runtime_relative_path(
             manifest_path, runtime_root=runtime_root
         ),
@@ -1771,6 +1825,9 @@ def _update_generated_mask_registry(
         'run_id',
         'generation_status',
         'provenance_path',
+        'checkpoint_sha256',
+        'metric_evidence_path',
+        'metric_evidence_sha256',
     ]
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     if registry_path.exists():
@@ -2553,6 +2610,13 @@ def run_medsam_glomeruli_fine_tuning_workflow(
             'status': 'skipped_config',
             'reason': 'baseline_evaluation.external_baselines=false',
         }
+        configured_oracle_metrics = _configured_oracle_metrics_path(
+            baseline_eval_cfg, runtime_root
+        )
+        if configured_oracle_metrics is not None:
+            external_baselines_summary['oracle_medsam_metrics_csv'] = str(
+                configured_oracle_metrics
+            )
     else:
         _emit('PHASE=baseline_evaluation status=started')
         external_baselines_summary = _run_external_fixed_split_baselines(
@@ -2696,7 +2760,17 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         dry_run=dry_run,
     )
     finetuned_evaluation.update(metric_evidence_context)
-    promotion_evidence = _promotion_evidence_summary(config, runtime_root)
+    inference_checkpoint_path = Path(
+        str(finetuned_evaluation.get('checkpoint_path', '')).strip()
+    )
+    inference_checkpoint_hash = _file_hash(inference_checkpoint_path)
+    promotion_evidence = _promotion_evidence_summary(
+        config,
+        runtime_root,
+        expected_run_id=str(metric_evidence_context['run_id']),
+        expected_fixed_split=str(metric_evidence_context['fixed_split']),
+        expected_checkpoint_sha256=inference_checkpoint_hash,
+    )
     if (
         str(promotion_evidence['overlay_review'].get('status', '')) == 'passed'
         and str(promotion_evidence['overlay_review'].get('sha256', ''))
@@ -2788,6 +2862,17 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 proposal_threshold=threshold,
                 adoption_tier=str(finetuned_comparison.get('adoption_tier', '')),
                 generated_masks=generated_release_items,
+                checkpoint_sha256=inference_checkpoint_hash,
+                metric_evidence_path=str(
+                    _mapping(finetuned_comparison.get('metric_evidence', {}), 'fine_tuned').get(
+                        'artifact_path', ''
+                    )
+                ),
+                metric_evidence_sha256=str(
+                    _mapping(finetuned_comparison.get('metric_evidence', {}), 'fine_tuned').get(
+                        'sha256', ''
+                    )
+                ),
             )
             _update_generated_mask_registry(
                 paths['generated_registry_path'],
@@ -2807,10 +2892,6 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 'status': 'skipped_no_prediction_masks',
                 'masks_dir': str(masks_eval_dir),
             }
-    inference_checkpoint_path = Path(
-        str(finetuned_evaluation.get('checkpoint_path', '')).strip()
-    )
-    inference_checkpoint_hash = _file_hash(inference_checkpoint_path)
     promotion_evidence_failures = [
         {
             'gate': key,
@@ -2903,14 +2984,16 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         else ''
     )
     evaluation_created_at = datetime.now().isoformat(timespec='seconds')
-    portable_checkpoint_hashes = {
-        str(
-            _portable_report_value(
-                path, runtime_root=runtime_root, key='checkpoint_path'
-            )
-        ): digest
-        for path, digest in checkpoint_hashes.items()
-    }
+    portable_checkpoint_hashes: dict[str, str] = {}
+    for path, digest in checkpoint_hashes.items():
+        encoded_path = _portable_report_value(
+            path, runtime_root=runtime_root, key='checkpoint_path'
+        )
+        if isinstance(encoded_path, dict):
+            encoded_key = f'external-absolute:{path}'
+        else:
+            encoded_key = str(encoded_path)
+        portable_checkpoint_hashes[encoded_key] = digest
     promotion_report = {
         'schema_version': 'eq.medsam.promotion-report/1',
         'path_encoding': RUNTIME_RELATIVE_POSIX_ENCODING,

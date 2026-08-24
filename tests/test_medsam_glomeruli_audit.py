@@ -211,6 +211,23 @@ def test_audit_checks_split_group_even_when_other_grouping_fields_differ(
     )
 
 
+def test_audit_blocks_duplicate_manifest_row_ids_within_one_split(
+    tmp_path: Path,
+) -> None:
+    rows = _cohort_fixture(tmp_path)
+    rows.loc[1, 'manifest_row_id'] = rows.loc[0, 'manifest_row_id']
+
+    audit = audit_medsam_evaluation_cohort(rows, tmp_path)
+
+    assert audit['duplicate_manifest_rows_by_split'] == {'train': ['row-1']}
+    assert audit['promotion_blocked'] is True
+    assert any(
+        issue['reason_code'] == 'duplicate_manifest_row_id_within_split'
+        and issue['manifest_row_id'] == 'row-1'
+        for issue in audit['issues']
+    )
+
+
 def test_audit_rejects_invalid_or_incomplete_split_composition(tmp_path: Path) -> None:
     rows = _cohort_fixture(tmp_path)
     rows.loc[3, 'split'] = 'holdout'

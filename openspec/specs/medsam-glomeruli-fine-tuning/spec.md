@@ -82,12 +82,12 @@ The workflow SHALL package reusable fine-tuned MedSAM generated masks under the 
 - **WHEN** a fine-tuned checkpoint passes configured generated-mask adoption gates
 - **THEN** the workflow MAY write a reusable generated-mask release under `derived_data/generated_masks/glomeruli/medsam_finetuned/<mask_release_id>/`
 - **AND** the release SHALL contain `masks/`, `manifest.csv`, `INDEX.md`, and `provenance.json`
-- **AND** the release manifest SHALL record `generated_mask_id`, `mask_release_id`, source image path, reference manual mask path when available, generated mask path, `mask_source=medsam_finetuned_glomeruli`, checkpoint ID, checkpoint path, proposal source, proposal threshold, run ID, generation status, adoption tier, and metric links when available
+- **AND** the release manifest SHALL record `generated_mask_id`, `mask_release_id`, source image path, reference manual mask path when available, generated mask path, `mask_source=medsam_finetuned_glomeruli`, checkpoint ID, checkpoint path and SHA-256, proposal source, proposal threshold, run ID, generation status, adoption tier, and metric-evidence path and SHA-256 when available
 
 #### Scenario: Central generated-mask registry is updated
 - **WHEN** a reusable generated-mask release is written
 - **THEN** the workflow SHALL update or create `derived_data/generated_masks/glomeruli/manifest.csv`
-- **AND** the central registry SHALL include `generated_mask_id`, `mask_release_id`, `mask_source`, `adoption_tier`, `cohort_id`, `lane_assignment`, `source_sample_id`, `source_image_path`, `reference_mask_path`, `generated_mask_path`, `release_manifest_path`, `checkpoint_id`, `checkpoint_path`, `proposal_source`, `proposal_threshold`, `run_id`, `generation_status`, and `provenance_path`
+- **AND** the central registry SHALL include `generated_mask_id`, `mask_release_id`, `mask_source`, `adoption_tier`, `cohort_id`, `lane_assignment`, `source_sample_id`, `source_image_path`, `reference_mask_path`, `generated_mask_path`, `release_manifest_path`, `checkpoint_id`, `checkpoint_path`, `checkpoint_sha256`, `proposal_source`, `proposal_threshold`, `run_id`, `generation_status`, `provenance_path`, and metric-evidence path and SHA-256 when available
 - **AND** downstream workflows SHALL prefer the central registry or a release-local manifest path over scanning `output/segmentation_evaluation/**` directories
 
 #### Scenario: Generated masks would enter raw data
@@ -170,3 +170,14 @@ stability, and non-degenerate prediction review evidence.
   and `status=passed` evidence records with readable hashed artifacts for
   overlay review, downstream grading stability, and non-degenerate prediction
   review
+
+#### Scenario: Release provenance binds evidence to the inference checkpoint
+- **WHEN** a reusable generated-mask release is written
+- **THEN** its manifest and provenance SHALL record the exact inference checkpoint SHA-256
+- **AND** they SHALL record the runtime-relative metric-evidence path and SHA-256 when metric evidence is available
+- **AND** each explicit promotion-evidence artifact SHALL declare schema version, evidence kind, passed status, evaluation run ID, fixed split, and the exact inference checkpoint SHA-256
+
+#### Scenario: Report paths leave the runtime root
+- **WHEN** a report includes a source configuration or other dependency outside the active runtime root
+- **THEN** it SHALL encode that value explicitly as an external absolute path with an external path-encoding marker
+- **AND** it SHALL NOT emit an unmarked absolute path under the `runtime-relative-posix` contract

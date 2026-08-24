@@ -14,10 +14,13 @@ from eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow import (
     _build_deterministic_splits,
     _build_finetuned_comparison_summary,
     _classify_generated_mask_adoption,
+    _configured_oracle_metrics_path,
     _load_metric_evidence,
     _package_generated_mask_release,
+    _portable_report_value,
     _preflight_training_dependencies,
     _prepare_medsam_npy_data,
+    _promotion_evidence_summary,
     _run_external_fixed_split_baselines,
     _run_finetuned_fixed_split_evaluation,
     _training_command_for_config,
@@ -58,6 +61,86 @@ def _write_metric_evidence_csv(
             for manifest_row_id in manifest_row_ids
         ]
     ).to_csv(path, index=False)
+
+
+def test_configured_oracle_metrics_path_is_selected_when_external_baselines_are_disabled(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / 'runtime'
+    configured = {
+        'external_baselines': False,
+        'oracle_metrics_csv': 'output/evaluation/baseline/oracle_metrics.csv',
+    }
+
+    assert _configured_oracle_metrics_path(configured, runtime_root) == (
+        runtime_root / 'output/evaluation/baseline/oracle_metrics.csv'
+    )
+    assert _configured_oracle_metrics_path(
+        {'external_baselines': False}, runtime_root
+    ) is None
+
+
+def test_promotion_report_marks_external_paths_explicitly(tmp_path: Path) -> None:
+    encoded = _portable_report_value(
+        '/outside/source/config.yaml',
+        runtime_root=tmp_path / 'runtime',
+        key='config_path',
+    )
+
+    assert encoded == {
+        'path': '/outside/source/config.yaml',
+        'path_encoding': 'external-absolute',
+        'reason': 'outside_runtime_root',
+    }
+
+
+def test_promotion_evidence_is_bound_to_run_split_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / 'runtime'
+    evidence_path = runtime_root / 'evidence/overlay.json'
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(
+        json.dumps(
+            {
+                'schema_version': 'eq.medsam.promotion-evidence/1',
+                'evidence_kind': 'overlay_review',
+                'status': 'passed',
+                'evaluation_run_id': 'run-1',
+                'fixed_split': 'test',
+                'checkpoint_sha256': 'c' * 64,
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    config = {
+        'promotion_evidence': {
+            'overlay_review': {
+                'status': 'passed',
+                'artifact_path': 'evidence/overlay.json',
+            }
+        }
+    }
+    valid = _promotion_evidence_summary(
+        config,
+        runtime_root,
+        expected_run_id='run-1',
+        expected_fixed_split='test',
+        expected_checkpoint_sha256='c' * 64,
+    )
+    foreign = _promotion_evidence_summary(
+        config,
+        runtime_root,
+        expected_run_id='run-2',
+        expected_fixed_split='test',
+        expected_checkpoint_sha256='c' * 64,
+    )
+
+    assert valid['overlay_review']['reason_code'] == ''
+    assert foreign['overlay_review']['reason_code'] == (
+        'overlay_review_artifact_identity_invalid'
+    )
 
 
 def test_fixed_split_generation_keeps_source_groups_together():
@@ -551,6 +634,9 @@ def _package_portable_release(runtime_root: Path) -> tuple[dict[str, Path], Path
     checkpoint = runtime_root / 'models/medsam_glomeruli/ckpt-1/model.pth'
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b'checkpoint')
+    metric_evidence = runtime_root / 'output/segmentation_evaluation/metrics.csv'
+    metric_evidence.parent.mkdir(parents=True, exist_ok=True)
+    metric_evidence.write_text('manifest_row_id,dice,jaccard\nrow-1,0.9,0.8\n')
     release_dir = (
         runtime_root
         / 'derived_data/generated_masks/glomeruli/medsam_finetuned/release-1'
@@ -567,6 +653,9 @@ def _package_portable_release(runtime_root: Path) -> tuple[dict[str, Path], Path
         proposal_source='transfer',
         proposal_threshold=0.35,
         adoption_tier='improved_candidate_not_oracle',
+        checkpoint_sha256='c' * 64,
+        metric_evidence_path=str(metric_evidence),
+        metric_evidence_sha256='m' * 64,
         generated_masks=[
             {
                 'manifest_row_id': 'row-1',
@@ -622,6 +711,15 @@ def test_generated_mask_release_uses_portable_runtime_relative_provenance(
     )
     assert manifest_a.loc[0, 'mask_source'] == 'medsam_finetuned_glomeruli'
     assert manifest_a.loc[0, 'adoption_tier'] == 'improved_candidate_not_oracle'
+    assert manifest_a.loc[0, 'checkpoint_sha256'] == 'c' * 64
+    assert manifest_a.loc[0, 'metric_evidence_path'] == (
+        'output/segmentation_evaluation/metrics.csv'
+    )
+    assert provenance_a['checkpoint_sha256'] == 'c' * 64
+    assert provenance_a['metric_evidence_path'] == (
+        'output/segmentation_evaluation/metrics.csv'
+    )
+    assert provenance_a['metric_evidence_sha256'] == 'm' * 64
     assert (release_a['index']).exists()
     assert (release_a['provenance']).exists()
 

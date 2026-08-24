@@ -505,7 +505,13 @@ def _load_release_rows(
                 )
             status = str(row.get('generation_status') or '').strip().lower()
             try:
-                validate_generated_mask_artifact_paths(row, runtime_root=runtime_root)
+                resolved_paths = validate_generated_mask_artifact_paths(
+                    row, runtime_root=runtime_root
+                )
+                if 'source_image_path' in resolved_paths:
+                    row['_resolved_source_image_path'] = str(
+                        resolved_paths['source_image_path']
+                    )
                 mask_path = resolve_runtime_relative_path(
                     str(row.get('generated_mask_path') or ''),
                     runtime_root=runtime_root,
@@ -574,22 +580,29 @@ def _build_prediction_payloads(
     if release_group is None:
         return {}
 
-    by_name: dict[str, Path] = {}
+    by_source_image: dict[Path, str] = {}
     for image_path in plan.image_paths:
         rel = image_path.relative_to(plan.images_dir).as_posix()
-        by_name[image_path.name.lower()] = Path(rel)
+        by_source_image[image_path.resolve()] = rel
 
     prediction_by_relative: dict[str, dict[str, Any]] = {}
     for idx, row in enumerate(release_group['rows'], start=1):
-        source_image = str(row.get('source_image_path') or '')
-        key = Path(source_image).name.lower()
-        if key not in by_name:
+        source_image = str(row.get('_resolved_source_image_path') or '').strip()
+        if not source_image:
+            continue
+        source_image_path = Path(source_image).resolve()
+        relative = by_source_image.get(source_image_path)
+        if relative is None:
             continue
         mask_path = Path(str(row['_resolved_generated_mask_path']))
         if not mask_path.is_file():
             continue
-        rel = by_name[key].as_posix()
-        prediction_by_relative[rel] = _prediction_from_mask(
+        if relative in prediction_by_relative:
+            raise BootstrapError(
+                'Generated-mask release contains duplicate source_image_path '
+                f'for Label Studio task {relative!r}'
+            )
+        prediction_by_relative[relative] = _prediction_from_mask(
             prediction_id=f'auto_{idx:05d}',
             mask_path=mask_path,
             mask_release_id=plan.selected_mask_release_id,
