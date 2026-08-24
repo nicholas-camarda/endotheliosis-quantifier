@@ -357,6 +357,27 @@ def test_box_diagnostics_keeps_missing_proposal_distinct_from_metric_failure() -
     json.dumps(diagnostics, allow_nan=False)
 
 
+def test_box_diagnostics_uses_all_accepted_boxes_as_one_proposal_union() -> None:
+    gt_mask = np.zeros((10, 10), dtype=np.uint8)
+    gt_mask[2:6, 3:7] = 1
+
+    diagnostics = box_diagnostics_for_row(
+        gt_mask,
+        [
+            {'bbox_x0': 3, 'bbox_y0': 2, 'bbox_x1': 5, 'bbox_y1': 6},
+            {'bbox_x0': 5, 'bbox_y0': 2, 'bbox_x1': 7, 'bbox_y1': 6},
+        ],
+        (10, 10),
+        {'dice': 0.93, 'jaccard': 0.87},
+        {'dice': 0.81, 'jaccard': 0.70},
+    )
+
+    assert diagnostics['proposal_status'] == 'valid'
+    assert diagnostics['proposal_count'] == 2
+    assert diagnostics['box_iou'] == pytest.approx(1.0)
+    assert diagnostics['gt_mask_coverage'] == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize('image_shape', [(1024, 1024), (2448, 2048)])
 def test_box_coordinate_round_trip_preserves_integer_bounds_within_one_pixel(
     image_shape: tuple[int, int],
@@ -493,11 +514,14 @@ def test_box_diagnostics_writer_is_deterministic_and_emits_one_row_per_locked_sa
     rows = pd.read_csv(first['artifacts']['csv']).fillna('')
     assert rows['manifest_row_id'].tolist() == ['row-a', 'row-b']
     assert rows.loc[0, 'proposal_status'] == 'valid'
-    assert rows.loc[1, 'proposal_status'] == 'missing'
+    assert rows.loc[1, 'proposal_status'] == 'rejected'
     assert rows.loc[0, 'automatic_dice'] == pytest.approx(0.81)
     assert rows.loc[1, 'automatic_metric_status'] == 'unavailable'
-    assert first['summary']['by_proposal_status'] == {'missing': 1, 'valid': 1}
-    assert first['summary']['by_quality_stratum'] == {'high_iou': 1, 'missing': 1}
+    assert first['summary']['by_proposal_status'] == {'rejected': 1, 'valid': 1}
+    assert first['summary']['by_quality_stratum'] == {'high_iou': 1, 'rejected': 1}
+    assert first['summary']['metrics_by_quality_stratum']['high_iou'][
+        'mean_automatic_dice'
+    ] == pytest.approx(0.81)
     assert len(first['artifacts']['sha256']) == 64
     assert csv_bytes == Path(second['artifacts']['csv']).read_bytes()
     assert json_bytes == Path(second['artifacts']['json']).read_bytes()

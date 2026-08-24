@@ -521,7 +521,7 @@ def check_box_round_trip(
 
 def box_diagnostics_for_row(
     gt_mask: np.ndarray,
-    automatic_box: dict[str, Any] | None,
+    automatic_box: dict[str, Any] | list[dict[str, Any]] | None,
     image_shape: tuple[int, int],
     oracle_metrics: dict[str, Any] | None,
     automatic_metrics: dict[str, Any] | None,
@@ -535,6 +535,7 @@ def box_diagnostics_for_row(
     automatic_jaccard = _metric_value(automatic_metrics, 'jaccard')
     result: dict[str, Any] = {
         'proposal_status': 'missing' if automatic_box is None else 'invalid',
+        'proposal_count': 0,
         'box_iou': None,
         'gt_mask_coverage': None,
         'proposal_to_gt_area_ratio': None,
@@ -552,25 +553,39 @@ def box_diagnostics_for_row(
     }
     if automatic_box is None or not len(y_indices):
         return result
-    values = _box_frame(automatic_box, image_shape)
-    if values is None:
+    raw_boxes = automatic_box if isinstance(automatic_box, list) else [automatic_box]
+    if not raw_boxes:
         return result
-    x0, y0, x1, y1 = values
+    frames = [_box_frame(box, image_shape) for box in raw_boxes]
+    if any(frame is None for frame in frames):
+        return result
+    proposal_mask = np.zeros(
+        (int(image_shape[0]), int(image_shape[1])), dtype=bool
+    )
+    for frame in frames:
+        assert frame is not None
+        x0, y0, x1, y1 = frame
+        proposal_mask[int(y0) : int(y1), int(x0) : int(x1)] = True
     gt_x0, gt_x1 = int(x_indices.min()), int(x_indices.max()) + 1
     gt_y0, gt_y1 = int(y_indices.min()), int(y_indices.max()) + 1
-    intersection = max(0.0, min(x1, gt_x1) - max(x0, gt_x0)) * max(
-        0.0, min(y1, gt_y1) - max(y0, gt_y0)
-    )
-    box_area = (x1 - x0) * (y1 - y0)
+    gt_box_mask = np.zeros_like(proposal_mask)
+    gt_box_mask[gt_y0:gt_y1, gt_x0:gt_x1] = True
+    intersection = int(np.count_nonzero(proposal_mask & gt_box_mask))
+    box_area = int(np.count_nonzero(proposal_mask))
     gt_area = float((gt_x1 - gt_x0) * (gt_y1 - gt_y0))
     union = box_area + gt_area - intersection
-    covered = int(np.count_nonzero(gt[int(y0) : int(y1), int(x0) : int(x1)]))
+    covered = int(np.count_nonzero(gt & proposal_mask))
+    proposal_y, proposal_x = np.where(proposal_mask)
     gt_center = ((gt_x0 + gt_x1) / 2.0, (gt_y0 + gt_y1) / 2.0)
-    box_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    box_center = (
+        (float(proposal_x.min()) + float(proposal_x.max()) + 1.0) / 2.0,
+        (float(proposal_y.min()) + float(proposal_y.max()) + 1.0) / 2.0,
+    )
     diagonal = float(np.hypot(float(image_shape[1]), float(image_shape[0])))
     result.update(
         {
             'proposal_status': 'valid',
+            'proposal_count': int(len(frames)),
             'box_iou': float(intersection / union) if union else 0.0,
             'gt_mask_coverage': float(covered / float(np.count_nonzero(gt))),
             'proposal_to_gt_area_ratio': float(box_area / gt_area),
@@ -611,29 +626,41 @@ def write_medsam_box_diagnostics(
         if Path(oracle_metrics_path).is_file()
         else pd.DataFrame()
     )
-    proposal_by_row: dict[str, dict[str, Any]] = {}
+    proposal_by_row: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    proposal_status_by_row: dict[str, str] = {}
     if not proposals.empty and 'manifest_row_id' in proposals.columns:
         for row in proposals.to_dict(orient='records'):
-            if str(row.get('decision') or '').strip() != 'generated':
-                continue
             if selected_candidate_family and str(row.get('candidate_family') or '').strip() != selected_candidate_family:
                 continue
             if selected_threshold is not None and not np.isclose(
                 float(row.get('threshold', selected_threshold)), float(selected_threshold)
             ):
                 continue
-            proposal_by_row.setdefault(str(row['manifest_row_id']), row)
+            row_id = str(row['manifest_row_id'])
+            decision = str(row.get('decision') or '').strip()
+            if decision == 'generated':
+                proposal_by_row[row_id].append(row)
+            elif row_id not in proposal_status_by_row:
+                proposal_status_by_row[row_id] = (
+                    'overflow' if decision == 'overflow' else 'rejected'
+                )
 
-    def _metrics_by_row(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    def _metrics_by_row(
+        frame: pd.DataFrame,
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
         if frame.empty or 'manifest_row_id' not in frame.columns:
-            return {}
-        return {
-            str(row['manifest_row_id']): row
-            for row in frame.to_dict(orient='records')
-        }
+            return {}, set()
+        mapping: dict[str, dict[str, Any]] = {}
+        duplicates: set[str] = set()
+        for row in frame.to_dict(orient='records'):
+            row_id = str(row['manifest_row_id'])
+            if row_id in mapping:
+                duplicates.add(row_id)
+            mapping[row_id] = row
+        return mapping, duplicates
 
-    automatic_by_row = _metrics_by_row(automatic)
-    oracle_by_row = _metrics_by_row(oracle)
+    automatic_by_row, automatic_duplicates = _metrics_by_row(automatic)
+    oracle_by_row, oracle_duplicates = _metrics_by_row(oracle)
     output_rows: list[dict[str, Any]] = []
     for record in fixed_rows.fillna('').sort_values('manifest_row_id').to_dict(orient='records'):
         row_id = str(record['manifest_row_id'])
@@ -646,11 +673,25 @@ def write_medsam_box_diagnostics(
         image_shape = Image.open(image_path).size[::-1] if image_path.is_file() else gt_mask.shape
         row_result = box_diagnostics_for_row(
             gt_mask,
-            proposal_by_row.get(row_id),
+            proposal_by_row.get(row_id) or None,
             (int(image_shape[0]), int(image_shape[1])),
             oracle_by_row.get(row_id),
             automatic_by_row.get(row_id),
         )
+        if not proposal_by_row.get(row_id) and row_id in proposal_status_by_row:
+            row_result['proposal_status'] = proposal_status_by_row[row_id]
+        if row_id in automatic_duplicates:
+            row_result.update(
+                automatic_metric_status='invalid',
+                automatic_dice=None,
+                automatic_jaccard=None,
+            )
+        if row_id in oracle_duplicates:
+            row_result.update(
+                oracle_metric_status='invalid',
+                oracle_dice=None,
+                oracle_jaccard=None,
+            )
         output_rows.append(
             {
                 'manifest_row_id': row_id,
@@ -665,7 +706,7 @@ def write_medsam_box_diagnostics(
         if row['proposal_status'] == 'missing':
             stratum = 'missing'
         elif row['proposal_status'] != 'valid':
-            stratum = 'invalid'
+            stratum = row['proposal_status']
         elif float(row['box_iou']) >= 0.75:
             stratum = 'high_iou'
         elif float(row['box_iou']) >= 0.50:
@@ -680,6 +721,7 @@ def write_medsam_box_diagnostics(
         'row_count': len(output_rows),
         'by_proposal_status': {str(key): int(value) for key, value in by_status.items()},
         'by_quality_stratum': {key: int(value) for key, value in sorted(by_stratum.items())},
+        'metrics_by_quality_stratum': {},
         'coordinate_metadata': {
             'source_frame': 'original_image_pixels_xyxy',
             'encoder_frame': 'square_encoder_pixels_xyxy',
@@ -687,6 +729,47 @@ def write_medsam_box_diagnostics(
             'round_trip_tolerance_pixels': 1,
         },
     }
+    for row in output_rows:
+        if row['proposal_status'] == 'missing':
+            stratum = 'missing'
+        elif row['proposal_status'] != 'valid':
+            stratum = row['proposal_status']
+        elif float(row['box_iou']) >= 0.75:
+            stratum = 'high_iou'
+        elif float(row['box_iou']) >= 0.50:
+            stratum = 'medium_iou'
+        else:
+            stratum = 'low_iou'
+        bucket = summary['metrics_by_quality_stratum'].setdefault(
+            stratum,
+            {
+                'row_count': 0,
+                'automatic_metric_count': 0,
+                'oracle_metric_count': 0,
+                'mean_automatic_dice': None,
+                'mean_automatic_jaccard': None,
+                'mean_oracle_dice': None,
+                'mean_oracle_jaccard': None,
+            },
+        )
+        bucket['row_count'] += 1
+        automatic_values = bucket.setdefault('_automatic_values', [])
+        oracle_values = bucket.setdefault('_oracle_values', [])
+        if row['automatic_dice'] is not None and row['automatic_jaccard'] is not None:
+            bucket['automatic_metric_count'] += 1
+            automatic_values.append((row['automatic_dice'], row['automatic_jaccard']))
+        if row['oracle_dice'] is not None and row['oracle_jaccard'] is not None:
+            bucket['oracle_metric_count'] += 1
+            oracle_values.append((row['oracle_dice'], row['oracle_jaccard']))
+    for bucket in summary['metrics_by_quality_stratum'].values():
+        automatic_values = bucket.pop('_automatic_values')
+        oracle_values = bucket.pop('_oracle_values')
+        if automatic_values:
+            bucket['mean_automatic_dice'] = float(np.mean([value[0] for value in automatic_values]))
+            bucket['mean_automatic_jaccard'] = float(np.mean([value[1] for value in automatic_values]))
+        if oracle_values:
+            bucket['mean_oracle_dice'] = float(np.mean([value[0] for value in oracle_values]))
+            bucket['mean_oracle_jaccard'] = float(np.mean([value[1] for value in oracle_values]))
     json_path.write_text(
         json.dumps({'summary': summary, 'rows': output_rows}, indent=2, sort_keys=True),
         encoding='utf-8',

@@ -2453,7 +2453,9 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         fixed_rows,
         proposal_boxes_path=finetuned_evaluation.get('proposal_boxes_csv', ''),
         automatic_metrics_path=finetuned_evaluation.get('metrics_csv', ''),
-        oracle_metrics_path=baseline_outputs.get('oracle_medsam_metrics_csv', ''),
+        oracle_metrics_path=external_baselines_summary.get(
+            'oracle_medsam_metrics_csv', ''
+        ),
         output_dir=paths['evaluation_dir'],
         selected_candidate_family=str(
             finetuned_evaluation.get('selected_candidate_family', '')
