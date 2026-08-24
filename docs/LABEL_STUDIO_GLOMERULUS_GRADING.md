@@ -6,13 +6,16 @@ This document describes the Stage 1 Label Studio grading contract for complete g
 
 Use this two-terminal path for hybrid MedSAM + Label Studio development. Label Studio runs in Docker; the MedSAM companion runs on the Mac host so MPS/Metal works.
 
+Set `EQ_SOURCE_ROOT` to the source checkout and `EQ_RUNTIME_ROOT` to the active
+runtime tree before running the commands below.
+
 Terminal 1:
 
 ```bash
-cd /Users/ncamarda/Projects/endotheliosis_quantifier
+cd "$EQ_SOURCE_ROOT"
 conda activate eq-mac
-PYTORCH_ENABLE_MPS_FALLBACK=1 /Users/ncamarda/mambaforge/envs/eq-mac/bin/python -m eq.labelstudio.medsam_companion \
-  --checkpoint /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth \
+PYTORCH_ENABLE_MPS_FALLBACK=1 python -m eq.labelstudio.medsam_companion \
+  --checkpoint "$EQ_RUNTIME_ROOT/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth" \
   --device mps \
   --port 8098
 ```
@@ -20,17 +23,20 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 /Users/ncamarda/mambaforge/envs/eq-mac/bin/python 
 Terminal 2:
 
 ```bash
-cd /Users/ncamarda/Projects/endotheliosis_quantifier
+cd "$EQ_SOURCE_ROOT"
 conda activate eq-mac
-eq labelstudio start /tmp/eq_hybrid_demo/images --project-name "Hybrid Demo Clean Components"
+eq labelstudio demo-hybrid \
+  --comparison-run-dir "$EQ_RUNTIME_ROOT/output/segmentation_evaluation/medsam_manual_glomeruli_comparison/pilot_medsam_manual_glomeruli_comparison" \
+  --comparison-manifest-row-id lauren_preeclampsia__000009 \
+  --project-name "EQ Hybrid Production Proof"
 ```
 
-Open the `Project URL` printed by `eq labelstudio start`. Do not assume the project id; fresh demo projects receive new `/projects/<id>/data` URLs.
+Open the `Project URL` printed by `eq labelstudio demo-hybrid`. Reuse the same `--project-name` each time; the command replaces the existing project with that title instead of accumulating more demo projects. Do not hardcode the numeric project id. The command also prints an acceptance artifact path containing the task manifest, preload status, companion policy, project URL, exact `manifest_row_id`, and the real MedSAM-versus-ground-truth proof fields used for the demo.
 
-For non-demo image folders, replace `/tmp/eq_hybrid_demo/images` with the image directory:
+For arbitrary image folders that are not tied to a proof row, pass an image directory directly:
 
 ```bash
-eq labelstudio start /path/to/images --project-name "Kidney Glomerulus Grading"
+eq labelstudio demo-hybrid /path/to/images --project-name "Kidney Glomerulus Grading"
 ```
 
 The command recursively imports `.jpg`, `.jpeg`, `.png`, `.tif`, and `.tiff` files, starts a local Docker Label Studio instance, creates or reuses the named project, applies `configs/label_studio_glomerulus_grading.xml`, imports the image tasks, and prints the Label Studio URL plus the project URL.
@@ -40,6 +46,7 @@ Hybrid preload and companion controls are YAML-first:
 - Default config: `configs/label_studio_medsam_hybrid.yaml`
 - Optional override: `--config /path/to/label_studio_medsam_hybrid.yaml`
 - Admin override: `--hybrid-mode auto|enabled|disabled`
+- Default posture: `hybrid.preload_enabled: false`, so the demo starts clean and uses box-assist/manual brush rather than noisy full-image preload masks.
 
 For companion launch and HTTP contract details, see `docs/LABEL_STUDIO_MEDSAM_COMPANION.md`.
 
@@ -62,8 +69,36 @@ These credentials belong to the `eq` Docker-backed Label Studio instance. A sepa
 To inspect the plan without starting Docker or calling Label Studio:
 
 ```bash
-eq labelstudio start /path/to/images --dry-run
+eq labelstudio demo-hybrid /path/to/images --dry-run
 ```
+
+To inspect the real-data proof path without starting Docker:
+
+```bash
+eq labelstudio demo-hybrid \
+  --dry-run \
+  --comparison-run-dir "$EQ_RUNTIME_ROOT/output/segmentation_evaluation/medsam_manual_glomeruli_comparison/pilot_medsam_manual_glomeruli_comparison" \
+  --comparison-manifest-row-id lauren_preeclampsia__000009
+```
+
+After completing and exporting annotations, validate the export and attach lineage evidence:
+
+```bash
+eq labelstudio demo-hybrid /path/to/images --dry-run --annotation-export /path/to/export.json
+```
+
+To refresh the canonical production-proof bundle from the current live project without replacing it:
+
+```bash
+eq labelstudio demo-hybrid \
+  --dry-run \
+  --live-export-only \
+  --comparison-run-dir "$EQ_RUNTIME_ROOT/output/segmentation_evaluation/medsam_manual_glomeruli_comparison/pilot_medsam_manual_glomeruli_comparison" \
+  --comparison-manifest-row-id vegfri_dox__000528 \
+  --project-name "EQ Hybrid Production Proof"
+```
+
+This fetches the current export for the named live project, rewrites the canonical acceptance artifact, and keeps the existing project intact.
 
 Useful options:
 
@@ -72,12 +107,12 @@ eq labelstudio start \
   /path/to/images \
   --project-name "Kidney Glomerulus Grading" \
   --port 8080 \
-  --runtime-root /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/labelstudio
+  --runtime-root "$EQ_RUNTIME_ROOT/labelstudio"
 ```
 
 Legacy `--images /path/to/images` remains supported for automation compatibility.
 
-The command is local/admin bootstrap only. It imports existing mask-release predictions and requires the companion for box-assist health when hybrid mode is enabled; it does not train segmentation, run quantification, run model second review, or adjudicate grades.
+The command is local/admin bootstrap only. With explicit preload enabled, it materializes existing mask-release proposals as editable brush annotations with task-level lineage, and requires the companion for box-assist health when hybrid mode is enabled; it does not train segmentation, run quantification, run model second review, or adjudicate grades.
 
 ## Purpose
 
@@ -100,7 +135,7 @@ Primary grading is human-first and model-blind. The primary Label Studio config 
 
 ## Admin And Developer Boundary
 
-Use `eq labelstudio start /path/to/images` as the primary setup path. Use `configs/label_studio_glomerulus_grading.xml` only when inspecting or manually debugging the Label Studio config. Use `configs/label_studio_medsam_hybrid.yaml` for mask-release selection, companion URL/health policy, and fail-closed preload behavior.
+Use `eq labelstudio demo-hybrid --comparison-run-dir ... --comparison-manifest-row-id ...` as the primary demonstrable setup path because it writes acceptance evidence tied to a real evaluated MedSAM row. Use `eq labelstudio demo-hybrid /path/to/images` when you want the same wrapper on an arbitrary image folder. Use `eq labelstudio start /path/to/images` when you only need the reusable bootstrap primitive. Use `configs/label_studio_glomerulus_grading.xml` only when inspecting or manually debugging the Label Studio config. Use `configs/label_studio_medsam_hybrid.yaml` for mask-release selection, companion URL/health policy, and fail-closed preload behavior.
 
 By default, bootstrap runtime artifacts live under:
 
@@ -142,6 +177,5 @@ The following are intentionally deferred to later OpenSpec changes:
 
 - model second-review inference
 - second-review or adjudication Label Studio project creation
-- live Label Studio ML backend deployment
-- MedSAM/SAM-assisted glomerulus selection
+- production hosted Label Studio ML backend deployment
 - collaborator-visible model suggestions during primary grading

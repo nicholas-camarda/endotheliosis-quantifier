@@ -92,6 +92,13 @@ def _load_labelstudio_bootstrap():
     return run_bootstrap
 
 
+def _load_labelstudio_demo():
+    """Import Label Studio demo runner lazily to keep CLI startup lightweight."""
+    from eq.labelstudio.demo import DEFAULT_DEMO_PROJECT_NAME, run_hybrid_demo
+
+    return run_hybrid_demo, DEFAULT_DEMO_PROJECT_NAME
+
+
 def _load_build_current_accessible_cohorts():
     """Import cohort-manifest build helpers lazily."""
     from eq.quantification import build_current_accessible_cohorts
@@ -538,6 +545,48 @@ def labelstudio_start_command(args):
 
 
 @log_function_call
+def labelstudio_demo_hybrid_command(args):
+    """Run the demonstrable hybrid Label Studio workflow and write evidence."""
+    run_hybrid_demo, _default_demo_project_name = _load_labelstudio_demo()
+    result = run_hybrid_demo(
+        images_dir=Path(args.image_dir) if args.image_dir else None,
+        runtime_root=Path(args.runtime_root) if args.runtime_root else None,
+        project_name=args.project_name,
+        port=args.port,
+        container_name=args.container_name,
+        docker_image=args.docker_image,
+        username=args.username,
+        password=args.password,
+        api_token=args.api_token,
+        timeout_seconds=args.timeout_seconds,
+        dry_run=args.dry_run,
+        config_path=Path(args.config) if args.config else None,
+        hybrid_mode=args.hybrid_mode,
+        acceptance_dir=Path(args.acceptance_dir) if args.acceptance_dir else None,
+        annotation_export=(
+            Path(args.annotation_export) if args.annotation_export else None
+        ),
+        comparison_run_dir=(
+            Path(args.comparison_run_dir) if args.comparison_run_dir else None
+        ),
+        comparison_manifest_row_id=args.comparison_manifest_row_id,
+        live_export_only=args.live_export_only,
+    )
+    print(result.bootstrap.message)
+    print(f'Task manifest: {result.bootstrap.task_manifest_path}')
+    print(f'Acceptance artifact: {result.acceptance_path}')
+    print(f'Label Studio URL: {result.bootstrap.plan.url}')
+    print(f'Login email: {args.username}')
+    print(f'Login password: {args.password}')
+    print(f'Hybrid status: {result.bootstrap.companion_status}')
+    project_url = (
+        result.bootstrap.project_url or str(result.acceptance.get('project_url') or '')
+    )
+    if project_url:
+        print(f'Project URL: {project_url}')
+
+
+@log_function_call
 def dox_mask_quality_audit_command(args):
     """Build optional Dox mask import-provenance panels."""
     logger = get_logger('eq.dox_mask_quality_audit')
@@ -975,7 +1024,7 @@ Examples:
     )
     cohort_manifest_parser.add_argument(
         '--runtime-root',
-        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or ~/ProjectsRuntime/endotheliosis_quantifier',
+        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or the workspace runtime default',
     )
     cohort_manifest_parser.add_argument(
         '--manifest-path',
@@ -1081,6 +1130,98 @@ Examples:
     )
     labelstudio_start_parser.set_defaults(func=labelstudio_start_command)
 
+    labelstudio_demo_parser = labelstudio_subparsers.add_parser(
+        'demo-hybrid',
+        help='Run the hybrid Label Studio demo path and write acceptance evidence',
+        description='Prepare a showable hybrid Label Studio workflow and write a JSON acceptance artifact.',
+    )
+    labelstudio_demo_parser.add_argument(
+        'image_dir',
+        nargs='?',
+        help='Directory of images to import recursively into Label Studio.',
+    )
+    _run_hybrid_demo, default_demo_project_name = _load_labelstudio_demo()
+    labelstudio_demo_parser.add_argument(
+        '--project-name',
+        default=default_demo_project_name,
+        help='Label Studio project title. Reusing the same name replaces the existing demo project.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--runtime-root',
+        help='Runtime directory for Label Studio files. Defaults to active runtime root/labelstudio.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--acceptance-dir',
+        help='Directory for the hybrid demo acceptance JSON artifact.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--annotation-export',
+        help='Optional Label Studio JSON export to validate and summarize in the acceptance artifact.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--live-export-only',
+        action='store_true',
+        help='Do not replace the project; fetch the current live export for the named project and refresh the acceptance artifact.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--comparison-run-dir',
+        help='Optional MedSAM manual-comparison run directory used to stage one real-data proof case.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--comparison-manifest-row-id',
+        help='Exact manifest_row_id from the comparison run to stage into the demo.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--port', type=int, default=8080, help='Local host port for Label Studio.'
+    )
+    labelstudio_demo_parser.add_argument(
+        '--container-name',
+        default='eq-labelstudio',
+        help='Docker container name for local Label Studio.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--docker-image',
+        default='heartexlabs/label-studio:1.23.0',
+        help='Docker image to use for Label Studio.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--username',
+        default='eq-admin@example.local',
+        help='Local Label Studio admin username.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--password',
+        default='eq-labelstudio',
+        help='Local Label Studio admin password.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--api-token',
+        default='eq-local-token',
+        help='Local Label Studio API token for project bootstrap.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--timeout-seconds',
+        type=int,
+        default=60,
+        help='Seconds to wait for Label Studio API readiness.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--config',
+        help='Optional hybrid YAML config. Defaults to configs/label_studio_medsam_hybrid.yaml.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--hybrid-mode',
+        choices=['auto', 'enabled', 'disabled'],
+        default='auto',
+        help='Administrator override for hybrid bootstrap behavior.',
+    )
+    labelstudio_demo_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Write the task manifest and acceptance artifact without Docker or API calls.',
+    )
+    labelstudio_demo_parser.set_defaults(func=labelstudio_demo_hybrid_command)
+
     overcoverage_parser = subparsers.add_parser(
         'glomeruli-overcoverage-audit',
         help='Audit glomeruli overcoverage across probability thresholds before retraining',
@@ -1143,7 +1284,7 @@ Examples:
     )
     dox_mask_quality_parser.add_argument(
         '--runtime-root',
-        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or ~/ProjectsRuntime/endotheliosis_quantifier.',
+        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or the workspace runtime default.',
     )
     dox_mask_quality_parser.add_argument(
         '--manifest-path',
@@ -1166,7 +1307,7 @@ Examples:
     )
     dox_scored_only_parser.add_argument(
         '--runtime-root',
-        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or ~/ProjectsRuntime/endotheliosis_quantifier.',
+        help='Active runtime root to use instead of EQ_RUNTIME_ROOT or the workspace runtime default.',
     )
     dox_scored_only_parser.add_argument(
         '--manifest-path',
@@ -1314,7 +1455,9 @@ Examples:
 
     # Initialize mode manager for the session based on global --mode
     session_mode = (
-        EnvironmentMode(args.mode) if getattr(args, 'mode', None) else EnvironmentMode.AUTO
+        EnvironmentMode(args.mode)
+        if getattr(args, 'mode', None)
+        else EnvironmentMode.AUTO
     )
 
     # Use the global mode manager from auto-setup to avoid duplicates

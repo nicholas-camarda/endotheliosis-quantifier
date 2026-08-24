@@ -41,13 +41,13 @@ Using a temporary local container (`localhost:8099`) with token auth:
 
 ### Contract decision from audit
 
-- Hybrid preload should be encoded in task `predictions` (not fake pre-annotations).
+- Hybrid preload is encoded as task-level lineage plus editable brush annotations created through the Label Studio annotation API. It is not imported through task `predictions`, because prediction-linked task state does not behave like native editable annotations during region selection.
 - Grader output remains authoritative in `annotations`.
-- Export parsers must treat `predictions` and `annotations` as separate sources and rely on `annotations` as authoritative for scored rows while preserving prediction lineage where present.
+- Export parsers rely on `annotations` as authoritative for scored rows while preserving auto-preload lineage from `data.preload_region_lineage`.
 
 ### Follow-on implications for tasks 3.x/4.x
 
-- Task builder should generate prediction payloads with Label Studio-compatible `brushlabels` + RLE fields.
+- Task builder should generate Label Studio-compatible `brushlabels` + RLE annotation payloads and store preload lineage in task data.
 - Export validation should require coherent lineage when a row claims preload/box-assist provenance.
 - Parser logic should preserve `parent_prediction`, annotation ids, and region ids for training/audit traceability.
 
@@ -92,7 +92,7 @@ Answer: **Yes**.
 
 Evidence:
 
-- Hybrid bootstrap now supports positional CLI image-dir, YAML-first config, release selection, preload prediction payloads, and companion health gating.
+- Hybrid bootstrap now supports positional CLI image-dir, YAML-first config, release selection, editable preload annotation payloads, and companion health gating.
 - Parser now emits hybrid lineage fields and rejects contradictory lineage payloads.
 - Quant contract path now accepts per-glomerulus instance exports and writes lineage summaries.
 
@@ -102,7 +102,7 @@ Runtime setup used:
 
 - Demo image subset copied from runtime manifest rows into `/tmp/eq_hybrid_demo/images/animal_1/`.
 - Companion checkpoint:
-  - `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth`
+  - `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth`
 
 Commands run and outcomes:
 
@@ -113,7 +113,7 @@ Commands run and outcomes:
    - `POST /v1/box_infer` on copied runtime image returned non-empty mask (`foreground_pixels=34956`, non-empty RLE).
 3. Bootstrap Label Studio hybrid project:
    - `python -m eq labelstudio start /tmp/eq_hybrid_demo/images`
-   - Imported 2 tasks with 2 preload predictions (runtime-default root path).
+   - Imported 2 tasks with 2 preload proposals (runtime-default root path).
 4. Create multi-ROI annotation + export:
    - Used Label Studio API to submit one preloaded ROI + one box-assisted ROI, each with a grade.
    - Export written to `/tmp/eq_hybrid_demo/project2_export.json`.
@@ -128,27 +128,36 @@ Issue discovered + fixed during E2E:
 - Label Studio readiness polling failed on transient `ConnectionResetError`.
 - Fix: `LabelStudioApiClient.wait_until_ready` now retries `ConnectionResetError` alongside existing transient HTTP startup failures.
 
-## Resume-here note (intentionally explicit, currently half-finished)
+## Current production-path proof state
 
-The end-to-end dev loop is operational (MPS companion, preload import, editable annotations, per-region grading linkage, and quant ingestion), but this change is still half-finished for operator usability and preload fidelity.
+The current hybrid workflow is no longer half-finished at the Label Studio contract layer. The repo now has direct evidence for the production-like path that mattered most:
 
-Current known state:
+- a fresh real-data comparison row can be staged into Label Studio with MedSAM preload,
+- multiple disconnected ROIs in one image render as separate editable brush regions,
+- each ROI can receive its own grade,
+- the exported Label Studio JSON parses back into one authoritative glomerulus-instance row per ROI,
+- and the parsed rows preserve `auto_preload`, `unedited_auto`, and the shared `mask_release_id`.
 
-- Preload regions are materialized into editable annotations for immediate brush/eraser editing.
-- Region grading is constrained per selected region (`perRegion` + single-choice radio).
-- Tiny preload connected components are filtered at import (`MIN_PRELOAD_COMPONENT_AREA_PX = 1000`).
-- Quantification drops zero-area/invalid regions from Label Studio exports to avoid ghost-row contamination.
-- The underlying release masks are still semantic/union artifacts, so per-instance preload quality can remain noisy for some images.
+Concrete live proof completed on 2026-05-23:
 
-What to do next when resuming:
+- comparison row: `vegfri_dox__000528`
+- live project URL during validation: `http://localhost:8080/projects/8/data`
+- rendered ROIs: `3`
+- exported scored rows: `3`
+- parsed grades: `0.5`, `2.0`, `1.0`
+- parsed lineage:
+  - `proposal_kind = auto_preload`
+  - `region_edit_state = unedited_auto`
+  - `mask_release_id = medsam_manual_glomeruli_comparison:pilot_medsam_manual_glomeruli_comparison:medsam_oracle`
 
-1. Add explicit preloading policy options in `configs/label_studio_medsam_hybrid.yaml` for:
-   - minimum component area threshold
-   - optional border-touch rejection
-   - optional max-area sanity gate
-2. Add project bootstrap option to preserve or strip prediction overlays after materialization (current manual cleanup is API-driven).
-3. Add one operator-facing cleanup command that:
-   - creates a fresh demo project
-   - strips prediction overlays when requested
-   - prints a single canonical URL to continue annotation
-4. Validate on real runtime rows that each loaded region corresponds to a single meaningful glomerulus before collaborator handoff.
+Implementation decisions tightened during this proof:
+
+- Preload lineage for materialized editable annotations is stored in task-level `data.preload_region_lineage` keyed by region id instead of writing unsupported custom keys onto Label Studio result objects.
+- Export parsing now links per-region grades through `parentID` when present, and the linkage validation no longer depends on result ordering.
+- Disconnected preload components remain separate regions end to end; they are not collapsed into one union-scored export row.
+
+Remaining product risks are now primarily about model quality and operator policy, not the Label Studio data contract:
+
+1. Some release masks may still be scientifically noisy even though the UI/export path is correct.
+2. Additional real rows should still be spot-checked before broader collaborator rollout.
+3. Optional future policy gates such as border-touch rejection or stricter component filtering remain product-tuning work, not blockers for the verified contract.

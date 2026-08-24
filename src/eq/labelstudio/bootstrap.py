@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import http.client
 import json
@@ -11,17 +12,16 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import numpy as np
 import yaml
-from label_studio_converter.brush import decode_rle as decode_labelstudio_brush_rle
-from label_studio_converter.brush import mask2rle
 from PIL import Image
 
+from eq.labelstudio.brush_rle import mask2rle
 from eq.utils.paths import (
     get_active_runtime_root,
     get_label_studio_medsam_hybrid_config_path,
@@ -49,29 +49,6 @@ DEFAULT_HYBRID_MODE = 'auto'
 MIN_PRELOAD_COMPONENT_AREA_PX = 1000
 
 
-# region agent log
-def _agent_debug_log(
-    *, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]
-) -> None:
-    try:
-        log_path = Path('/Users/ncamarda/Projects/endotheliosis_quantifier/.cursor/debug-b42b0c.log')
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            'sessionId': 'b42b0c',
-            'runId': run_id,
-            'hypothesisId': hypothesis_id,
-            'location': location,
-            'message': message,
-            'data': data,
-            'timestamp': int(time.time() * 1000),
-        }
-        with log_path.open('a', encoding='utf-8') as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + '\n')
-    except Exception:
-        pass
-# endregion
-
-
 class BootstrapError(RuntimeError):
     """Raised when local Label Studio bootstrap cannot proceed."""
 
@@ -79,6 +56,7 @@ class BootstrapError(RuntimeError):
 @dataclass(frozen=True)
 class HybridBootstrapSettings:
     enabled: bool
+    preload_enabled: bool
     selection_mode: str
     mask_release_id: str
     companion_base_url: str
@@ -94,6 +72,8 @@ class BootstrapPlan:
     runtime_root: Path
     data_dir: Path
     media_dir: Path
+    media_mount_dir: Path
+    local_files_dataset_dir: str
     imports_dir: Path
     bootstrap_dir: Path
     task_manifest_path: Path
@@ -146,6 +126,7 @@ def build_labelstudio_tasks(
     images_dir: Path,
     image_paths: Iterable[Path],
     *,
+    local_files_dataset_dir: str,
     prediction_by_relative_path: dict[str, dict[str, Any]] | None = None,
     mask_release_id: str = '',
 ) -> list[dict[str, Any]]:
@@ -155,11 +136,12 @@ def build_labelstudio_tasks(
     for image_path in image_paths:
         image_path = Path(image_path).expanduser().resolve()
         relative = image_path.relative_to(images_dir).as_posix()
+        served_relative = f'{local_files_dataset_dir}/{relative}'
         parts = Path(relative).parts
         subject_hint = parts[0] if len(parts) > 1 else image_path.stem
         task: dict[str, Any] = {
             'data': {
-                'image': f'/data/local-files/?d={relative}',
+                'image': f'/data/local-files/?d={served_relative}',
                 'source_relative_path': relative,
                 'source_filename': image_path.name,
                 'subject_hint': subject_hint,
@@ -167,8 +149,11 @@ def build_labelstudio_tasks(
             }
         }
         if prediction_by_relative_path and relative in prediction_by_relative_path:
-            task['predictions'] = [prediction_by_relative_path[relative]]
+            prediction = prediction_by_relative_path[relative]
             task['data']['preload_prediction_status'] = 'available'
+            task['data']['preload_region_lineage'] = _build_preload_region_lineage(
+                prediction
+            )
         else:
             task['data']['preload_prediction_status'] = 'missing'
         tasks.append(task)
@@ -203,6 +188,7 @@ def plan_bootstrap(
     imports_dir = root / 'imports'
     settings = hybrid_settings or HybridBootstrapSettings(
         enabled=False,
+        preload_enabled=False,
         selection_mode=DEFAULT_HYBRID_SELECTION_MODE,
         mask_release_id='',
         companion_base_url='',
@@ -216,10 +202,14 @@ def plan_bootstrap(
         runtime_root=root,
         data_dir=root / 'data',
         media_dir=images_dir,
+        media_mount_dir=images_dir.parent,
+        local_files_dataset_dir=images_dir.name,
         imports_dir=imports_dir,
         bootstrap_dir=root / 'bootstrap',
         task_manifest_path=imports_dir / f'{safe_project}_tasks.json',
-        label_config_path=get_repo_root() / 'configs' / 'label_studio_glomerulus_grading.xml',
+        label_config_path=get_repo_root()
+        / 'configs'
+        / 'label_studio_glomerulus_grading.xml',
         project_title=project_name,
         url=url,
         project_url='',
@@ -256,14 +246,15 @@ def run_bootstrap(
     dry_run: bool = False,
     config_path: Path | None = None,
     hybrid_mode: str = DEFAULT_HYBRID_MODE,
+    prediction_by_relative_path_override: dict[str, dict[str, Any]] | None = None,
+    mask_release_id_override: str = '',
+    replace_existing_project: bool = False,
     docker_runner: DockerRunner | None = None,
     api_client: 'LabelStudioApiClient | Any | None' = None,
 ) -> BootstrapResult:
     """Prepare a local Label Studio project and import image tasks."""
     hybrid_settings = _resolve_hybrid_settings(
-        config_path=config_path,
-        hybrid_mode=hybrid_mode,
-        runtime_root=runtime_root,
+        config_path=config_path, hybrid_mode=hybrid_mode, runtime_root=runtime_root
     )
     plan = plan_bootstrap(
         images_dir=images_dir,
@@ -279,23 +270,30 @@ def run_bootstrap(
         hybrid_settings=hybrid_settings,
         hybrid_mode=hybrid_mode,
     )
-    prediction_by_relative = _build_prediction_payloads(
-        plan,
-        hybrid_settings=hybrid_settings,
+    prediction_by_relative = (
+        prediction_by_relative_path_override
+        or _build_prediction_payloads(plan, hybrid_settings=hybrid_settings)
     )
-    if plan.fail_on_missing_preload and plan.task_count and (
-        len(prediction_by_relative) < plan.task_count
+    effective_mask_release_id = (
+        str(mask_release_id_override).strip() or plan.selected_mask_release_id
+    )
+    if (
+        not prediction_by_relative_path_override
+        and plan.fail_on_missing_preload
+        and plan.task_count
+        and (len(prediction_by_relative) < plan.task_count)
     ):
         raise BootstrapError(
-            'Hybrid config requires preload predictions for all tasks, '
+            'Hybrid config requires preload proposals for all tasks, '
             f'but only {len(prediction_by_relative)}/{plan.task_count} were resolved '
             f'from mask release {plan.selected_mask_release_id}.'
         )
     tasks = build_labelstudio_tasks(
         plan.images_dir,
         plan.image_paths,
+        local_files_dataset_dir=plan.local_files_dataset_dir,
         prediction_by_relative_path=prediction_by_relative,
-        mask_release_id=plan.selected_mask_release_id,
+        mask_release_id=effective_mask_release_id,
     )
     _write_task_manifest(plan, tasks)
     companion_status = _companion_status_summary(plan, hybrid_settings=hybrid_settings)
@@ -307,7 +305,7 @@ def run_bootstrap(
             message=(
                 f'Dry run: would start {plan.container_name}, create project '
                 f'{plan.project_title!r}, and import {plan.task_count} images. '
-                f'Preload predictions: {len(prediction_by_relative)}.'
+                f'Preload proposals: {len(prediction_by_relative)}.'
             ),
             companion_status=companion_status,
         )
@@ -321,7 +319,9 @@ def run_bootstrap(
         project_title=plan.project_title,
         label_config=plan.label_config_path.read_text(encoding='utf-8'),
         tasks=tasks,
+        preload_annotation_by_relative_path=prediction_by_relative,
         timeout_seconds=plan.timeout_seconds,
+        replace_existing_project=replace_existing_project,
     )
     project_url = f'{plan.url}/projects/{project_id}/data'
     return BootstrapResult(
@@ -331,17 +331,14 @@ def run_bootstrap(
         message=(
             f'Label Studio project ready: {project_url} '
             f'({plan.task_count} image tasks imported, '
-            f'{len(prediction_by_relative)} with preload predictions)'
+            f'{len(prediction_by_relative)} with preload proposals)'
         ),
         companion_status=companion_status,
     )
 
 
 def _resolve_hybrid_settings(
-    *,
-    config_path: Path | None,
-    hybrid_mode: str,
-    runtime_root: Path | None,
+    *, config_path: Path | None, hybrid_mode: str, runtime_root: Path | None
 ) -> HybridBootstrapSettings:
     if hybrid_mode not in {'auto', 'enabled', 'disabled'}:
         raise BootstrapError(
@@ -377,6 +374,14 @@ def _resolve_hybrid_settings(
         if hybrid_mode == 'enabled'
         else enabled_default
     )
+    preload_enabled = (
+        bool(hybrid_raw.get('preload_enabled', False)) if enabled else False
+    )
+    pinned_release = str(hybrid_raw.get('mask_release_id') or '').strip()
+    if enabled and not preload_enabled and pinned_release:
+        raise BootstrapError(
+            'hybrid.mask_release_id requires hybrid.preload_enabled: true'
+        )
     selection_mode = str(
         hybrid_raw.get('selection_mode', DEFAULT_HYBRID_SELECTION_MODE)
     ).strip()
@@ -385,11 +390,15 @@ def _resolve_hybrid_settings(
             'Invalid hybrid.selection_mode; supported values: latest_valid'
         )
 
-    selected_release = _select_mask_release_id(
-        pinned_id=str(hybrid_raw.get('mask_release_id') or '').strip(),
-        selection_mode=selection_mode,
-        runtime_root=runtime_root,
-    ) if enabled else ''
+    selected_release = (
+        _select_mask_release_id(
+            pinned_id=pinned_release,
+            selection_mode=selection_mode,
+            runtime_root=runtime_root,
+        )
+        if preload_enabled
+        else ''
+    )
     companion_base = str(
         companion_raw.get('base_url', DEFAULT_COMPANION_BASE_URL)
     ).strip()
@@ -402,27 +411,29 @@ def _resolve_hybrid_settings(
         )
     return HybridBootstrapSettings(
         enabled=enabled,
+        preload_enabled=preload_enabled,
         selection_mode=selection_mode,
         mask_release_id=selected_release,
         companion_base_url=companion_base if enabled else '',
         companion_health_path=companion_health,
         require_box_assisted_medsam=bool(
             hybrid_raw.get('require_box_assisted_medsam', True)
-        ) if enabled else False,
+        )
+        if enabled
+        else False,
         offline_manual_only_allowed=bool(
             hybrid_raw.get('offline_manual_only_allowed', False)
-        ) if enabled else False,
-        fail_on_missing_preload=bool(
-            hybrid_raw.get('fail_on_missing_preload', False)
-        ) if enabled else False,
+        )
+        if enabled
+        else False,
+        fail_on_missing_preload=bool(hybrid_raw.get('fail_on_missing_preload', False))
+        if enabled
+        else False,
     )
 
 
 def _select_mask_release_id(
-    *,
-    pinned_id: str,
-    selection_mode: str,
-    runtime_root: Path | None,
+    *, pinned_id: str, selection_mode: str, runtime_root: Path | None
 ) -> str:
     manifest_path = get_runtime_generated_masks_glomeruli_manifest_path(runtime_root)
     if not manifest_path.exists():
@@ -463,8 +474,7 @@ def _load_release_rows(manifest_path: Path) -> dict[str, dict[str, Any]]:
             if not release_id:
                 continue
             group = grouped.setdefault(
-                release_id,
-                {'rows': [], 'generated_count': 0, 'latest_mtime': 0.0},
+                release_id, {'rows': [], 'generated_count': 0, 'latest_mtime': 0.0}
             )
             group['rows'].append(row)
             status = str(row.get('generation_status') or '').strip().lower()
@@ -480,20 +490,6 @@ def _load_release_rows(manifest_path: Path) -> dict[str, dict[str, Any]]:
 def _build_prediction_payloads(
     plan: BootstrapPlan, *, hybrid_settings: HybridBootstrapSettings
 ) -> dict[str, dict[str, Any]]:
-    # region agent log
-    _agent_debug_log(
-        run_id='pre-fix',
-        hypothesis_id='H1,H4,H5',
-        location='src/eq/labelstudio/bootstrap.py:_build_prediction_payloads',
-        message='entered prediction payload build',
-        data={
-            'hybrid_enabled': hybrid_settings.enabled,
-            'selected_mask_release_id': plan.selected_mask_release_id,
-            'image_count': len(plan.image_paths),
-            'images_dir': str(plan.images_dir),
-        },
-    )
-    # endregion
     if not hybrid_settings.enabled or not plan.selected_mask_release_id:
         return {}
     runtime_root = (
@@ -514,7 +510,6 @@ def _build_prediction_payloads(
         by_name[image_path.name.lower()] = Path(rel)
 
     prediction_by_relative: dict[str, dict[str, Any]] = {}
-    debug_rows: list[dict[str, Any]] = []
     with release_manifest_path.open('r', encoding='utf-8', newline='') as handle:
         reader = csv.DictReader(handle)
         for idx, row in enumerate(reader, start=1):
@@ -531,31 +526,6 @@ def _build_prediction_payloads(
                 mask_path=mask_path,
                 mask_release_id=plan.selected_mask_release_id,
             )
-            if len(debug_rows) < 10:
-                debug_rows.append(
-                    {
-                        'relative_image_path': rel,
-                        'source_image_path': source_image,
-                        'generated_mask_path': str(mask_path),
-                        'mask_source': str(row.get('mask_source') or ''),
-                        'generation_status': str(row.get('generation_status') or ''),
-                        'release_manifest_path': str(release_manifest_path),
-                    }
-                )
-    # region agent log
-    _agent_debug_log(
-        run_id='pre-fix',
-        hypothesis_id='H1,H4,H5',
-        location='src/eq/labelstudio/bootstrap.py:_build_prediction_payloads',
-        message='finished prediction payload build',
-        data={
-            'prediction_count': len(prediction_by_relative),
-            'selected_mask_release_id': plan.selected_mask_release_id,
-            'release_dir': str(release_dir),
-            'matched_rows_sample': debug_rows,
-        },
-    )
-    # endregion
     return prediction_by_relative
 
 
@@ -565,33 +535,12 @@ def _prediction_from_mask(
     mask = Image.open(mask_path).convert('L')
     mask_np = (np.array(mask) > 0).astype(np.uint8)
     height, width = mask_np.shape
-    component_masks, component_debug = _connected_component_masks(mask_np)
+    component_masks = _connected_component_masks(mask_np)
     if not component_masks:
         component_masks = [mask_np]
     result: list[dict[str, Any]] = []
     for component_idx, component_mask in enumerate(component_masks, start=1):
         rle = mask2rle((component_mask * 255).astype(np.uint8))
-        encoded_debug = _rle_geometry_summary(rle, width=width, height=height)
-        # region agent log
-        _agent_debug_log(
-            run_id='pre-fix',
-            hypothesis_id='H1,H2,H3',
-            location='src/eq/labelstudio/bootstrap.py:_prediction_from_mask',
-            message='encoded preload component',
-            data={
-                'prediction_id': prediction_id,
-                'component_idx': component_idx,
-                'mask_path': str(mask_path),
-                'mask_release_id': mask_release_id,
-                'source_mask_shape': [int(height), int(width)],
-                'source_positive_pixels': int(mask_np.sum()),
-                'all_components': component_debug,
-                'kept_component_area': int(component_mask.sum()),
-                'kept_component_bbox': _binary_mask_bbox(component_mask),
-                'encoded_component_geometry': encoded_debug,
-            },
-        )
-        # endregion
         result.append(
             {
                 'id': f'{prediction_id}_{component_idx:03d}',
@@ -600,6 +549,8 @@ def _prediction_from_mask(
                 'type': 'brushlabels',
                 'original_width': int(width),
                 'original_height': int(height),
+                'image_rotation': 0,
+                'origin': 'prediction',
                 'value': {
                     'format': 'rle',
                     'rle': rle,
@@ -614,7 +565,48 @@ def _prediction_from_mask(
     }
 
 
-def _connected_component_masks(mask_np: np.ndarray) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
+def _build_preload_region_lineage(
+    prediction: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    result = prediction.get('result')
+    if not isinstance(result, list):
+        return {}
+    model_version = str(prediction.get('model_version') or '')
+    mask_release_id = _mask_release_from_model_version(model_version)
+    mask_source = _mask_source_from_model_version(model_version)
+    lineage: dict[str, dict[str, str]] = {}
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        region_id = str(item.get('id') or '').strip()
+        if not region_id:
+            continue
+        lineage[region_id] = {
+            'origin': 'auto_preload',
+            'mask_release_id': mask_release_id,
+            'mask_source': mask_source,
+            'source_prediction_id': region_id,
+            'preload_geometry_signature': _preload_geometry_signature(item),
+        }
+    return lineage
+
+
+def _preload_geometry_signature(item: dict[str, Any]) -> str:
+    value = item.get('value') or {}
+    return json.dumps(
+        {
+            'format': value.get('format'),
+            'rle': value.get('rle'),
+            'points': value.get('points'),
+            'brushlabels': value.get('brushlabels'),
+            'polygonlabels': value.get('polygonlabels'),
+            'rectanglelabels': value.get('rectanglelabels'),
+        },
+        sort_keys=True,
+    )
+
+
+def _connected_component_masks(mask_np: np.ndarray) -> list[np.ndarray]:
     """Split a binary mask into disconnected per-instance binary masks."""
     if mask_np.ndim != 2:
         raise BootstrapError('Expected 2D mask for Label Studio preload conversion')
@@ -624,7 +616,6 @@ def _connected_component_masks(mask_np: np.ndarray) -> tuple[list[np.ndarray], l
     height, width = active.shape
     visited = np.zeros_like(active, dtype=bool)
     components: list[np.ndarray] = []
-    component_debug: list[dict[str, Any]] = []
     for y in range(height):
         for x in range(width):
             if not active[y, x] or visited[y, x]:
@@ -635,12 +626,7 @@ def _connected_component_masks(mask_np: np.ndarray) -> tuple[list[np.ndarray], l
             while queue:
                 cy, cx = queue.popleft()
                 component[cy, cx] = 1
-                for ny, nx in (
-                    (cy - 1, cx),
-                    (cy + 1, cx),
-                    (cy, cx - 1),
-                    (cy, cx + 1),
-                ):
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
                     if ny < 0 or ny >= height or nx < 0 or nx >= width:
                         continue
                     if not active[ny, nx] or visited[ny, nx]:
@@ -648,19 +634,26 @@ def _connected_component_masks(mask_np: np.ndarray) -> tuple[list[np.ndarray], l
                     visited[ny, nx] = True
                     queue.append((ny, nx))
             components.append(component)
-            component_debug.append(
-                {
-                    'area': int(component.sum()),
-                    'bbox': _binary_mask_bbox(component),
-                    'kept_by_area_filter': int(component.sum()) >= MIN_PRELOAD_COMPONENT_AREA_PX,
-                }
-            )
     filtered: list[np.ndarray] = []
     for component in components:
         if int(component.sum()) < MIN_PRELOAD_COMPONENT_AREA_PX:
             continue
         filtered.append(component)
-    return filtered, component_debug
+    return filtered
+
+
+def _mask_source_from_model_version(model_version: str) -> str:
+    if str(model_version).startswith('medsam-release:'):
+        return 'medsam_finetuned_glomeruli'
+    return ''
+
+
+def _mask_release_from_model_version(model_version: str) -> str:
+    text = str(model_version).strip()
+    prefix = 'medsam-release:'
+    if text.startswith(prefix):
+        return text[len(prefix) :].strip()
+    return ''
 
 
 def _binary_mask_bbox(mask_np: np.ndarray) -> list[int] | None:
@@ -669,14 +662,6 @@ def _binary_mask_bbox(mask_np: np.ndarray) -> list[int] | None:
         return None
     return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
 
-
-def _rle_geometry_summary(rle: list[Any], *, width: int, height: int) -> dict[str, Any]:
-    try:
-        rgba = decode_labelstudio_brush_rle(rle).reshape((int(height), int(width), 4))
-        alpha = (rgba[:, :, 3] > 0).astype(np.uint8)
-        return {'area': int(alpha.sum()), 'bbox': _binary_mask_bbox(alpha)}
-    except Exception as exc:
-        return {'decode_error': str(exc)}
 
 def _companion_status_summary(
     plan: BootstrapPlan, *, hybrid_settings: HybridBootstrapSettings
@@ -715,7 +700,9 @@ def _enforce_companion_health(
 
 
 def ensure_docker_available(
-    runner: DockerRunner | None = None, *, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    runner: DockerRunner | None = None,
+    *,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> None:
     """Fail early if Docker is missing, and start Docker Desktop on macOS when possible."""
     if shutil.which('docker') is None:
@@ -743,19 +730,25 @@ def ensure_docker_available(
     )
 
 
-def start_labelstudio_container(plan: BootstrapPlan, runner: DockerRunner | None = None) -> None:
+def start_labelstudio_container(
+    plan: BootstrapPlan, runner: DockerRunner | None = None
+) -> None:
     """Start or reuse the local Label Studio Docker container."""
     runner = runner or _run_command
     inspect = runner(['docker', 'inspect', plan.container_name])
     if inspect.returncode == 0:
-        if not _container_matches_plan(inspect.stdout):
+        if not _container_matches_plan(plan, inspect.stdout):
             remove = runner(['docker', 'rm', '-f', plan.container_name])
             if remove.returncode != 0:
-                raise BootstrapError(f'Failed to replace container {plan.container_name}')
+                raise BootstrapError(
+                    f'Failed to replace container {plan.container_name}'
+                )
             command = docker_run_command(plan)
             result = runner(command)
             if result.returncode != 0:
-                raise BootstrapError(f'Failed to start Label Studio Docker container: {result.stderr}')
+                raise BootstrapError(
+                    f'Failed to start Label Studio Docker container: {result.stderr}'
+                )
             return
         start = runner(['docker', 'start', plan.container_name])
         if start.returncode != 0:
@@ -766,7 +759,9 @@ def start_labelstudio_container(plan: BootstrapPlan, runner: DockerRunner | None
     command = docker_run_command(plan)
     result = runner(command)
     if result.returncode != 0:
-        raise BootstrapError(f'Failed to start Label Studio Docker container: {result.stderr}')
+        raise BootstrapError(
+            f'Failed to start Label Studio Docker container: {result.stderr}'
+        )
 
 
 def docker_run_command(plan: BootstrapPlan) -> list[str]:
@@ -782,7 +777,7 @@ def docker_run_command(plan: BootstrapPlan) -> list[str]:
         '-v',
         f'{plan.data_dir}:/label-studio/data',
         '-v',
-        f'{plan.media_dir}:{CONTAINER_LOCAL_FILES_ROOT}:ro',
+        f'{plan.media_mount_dir}:{CONTAINER_LOCAL_FILES_ROOT}:ro',
         '-e',
         'LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true',
         '-e',
@@ -799,17 +794,26 @@ def docker_run_command(plan: BootstrapPlan) -> list[str]:
     ]
 
 
-def _container_matches_plan(inspect_stdout: str) -> bool:
+def _container_matches_plan(plan: BootstrapPlan, inspect_stdout: str) -> bool:
     try:
         details = json.loads(inspect_stdout)
     except json.JSONDecodeError:
         return False
     container = details[0] if isinstance(details, list) and details else {}
     mounts = container.get('Mounts', []) if isinstance(container, dict) else []
-    destinations = {mount.get('Destination') for mount in mounts if isinstance(mount, dict)}
+    mount_map = {
+        str(mount.get('Destination')): str(mount.get('Source'))
+        for mount in mounts
+        if isinstance(mount, dict)
+    }
+    media_source = mount_map.get(CONTAINER_LOCAL_FILES_ROOT)
+    data_source = mount_map.get('/label-studio/data')
+    expected_media_source = str(plan.media_mount_dir)
+    expected_data_source = str(plan.data_dir)
     return (
-        CONTAINER_LOCAL_FILES_ROOT in destinations
-        and f'{CONTAINER_LOCAL_FILES_ROOT}/images' not in destinations
+        media_source == expected_media_source
+        and data_source == expected_data_source
+        and f'{CONTAINER_LOCAL_FILES_ROOT}/images' not in mount_map
     )
 
 
@@ -839,10 +843,15 @@ class LabelStudioApiClient:
         project_title: str,
         label_config: str,
         tasks: list[dict[str, Any]],
+        preload_annotation_by_relative_path: dict[str, dict[str, Any]] | None = None,
         timeout_seconds: int,
+        replace_existing_project: bool = False,
     ) -> int:
         self.wait_until_ready(timeout_seconds)
         project_id = self._find_project(project_title)
+        if project_id is not None and replace_existing_project:
+            self._request_json('DELETE', f'/api/projects/{project_id}/')
+            project_id = None
         if project_id is None:
             response = self._request_json(
                 'POST',
@@ -852,14 +861,31 @@ class LabelStudioApiClient:
             project_id = int(response['id'])
         else:
             self._request_json(
-                'PATCH',
-                f'/api/projects/{project_id}/',
-                {'label_config': label_config},
+                'PATCH', f'/api/projects/{project_id}/', {'label_config': label_config}
             )
         self._ensure_local_file_storages(project_id, tasks)
         self._request_json('POST', f'/api/projects/{project_id}/import', tasks)
-        self._materialize_preload_predictions_as_annotations(project_id, imported_tasks=tasks)
+        self._materialize_preload_annotations(
+            project_id,
+            imported_tasks=tasks,
+            preload_annotation_by_relative_path=preload_annotation_by_relative_path
+            or {},
+        )
         return project_id
+
+    def find_project_id(self, project_title: str) -> int | None:
+        self.wait_until_ready(DEFAULT_TIMEOUT_SECONDS)
+        return self._find_project(project_title)
+
+    def export_project(self, project_id: int) -> list[dict[str, Any]]:
+        response = self._request_json(
+            'GET', f'/api/projects/{int(project_id)}/export?exportType=JSON'
+        )
+        if not isinstance(response, list):
+            raise BootstrapError(
+                f'Expected JSON export list for project {project_id}, got {type(response).__name__}'
+            )
+        return response
 
     def wait_until_ready(self, timeout_seconds: int) -> None:
         deadline = time.monotonic() + timeout_seconds
@@ -887,8 +913,12 @@ class LabelStudioApiClient:
                 return int(project['id'])
         return None
 
-    def _ensure_local_file_storages(self, project_id: int, tasks: list[dict[str, Any]]) -> None:
-        response = self._request_json('GET', f'/api/storages/localfiles/?project={project_id}')
+    def _ensure_local_file_storages(
+        self, project_id: int, tasks: list[dict[str, Any]]
+    ) -> None:
+        response = self._request_json(
+            'GET', f'/api/storages/localfiles/?project={project_id}'
+        )
         storages = _list_response_items(response)
         existing_paths = {storage.get('path') for storage in storages}
         for storage_path in _local_file_storage_paths(tasks):
@@ -906,9 +936,7 @@ class LabelStudioApiClient:
                 },
             )
 
-    def _request_json(
-        self, method: str, path: str, payload: Any | None = None
-    ) -> Any:
+    def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
         headers = {'Authorization': f'Token {self.api_token}'}
         if payload is not None:
@@ -927,36 +955,24 @@ class LabelStudioApiClient:
             ) from exc
         return json.loads(raw) if raw else {}
 
-    def _materialize_preload_predictions_as_annotations(
-        self, project_id: int, *, imported_tasks: list[dict[str, Any]]
+    def _materialize_preload_annotations(
+        self,
+        project_id: int,
+        *,
+        imported_tasks: list[dict[str, Any]],
+        preload_annotation_by_relative_path: dict[str, dict[str, Any]],
     ) -> None:
-        """Copy imported predictions into editable annotations when needed."""
-        # region agent log
-        _agent_debug_log(
-            run_id='pre-fix',
-            hypothesis_id='H3,H4',
-            location='src/eq/labelstudio/bootstrap.py:_materialize_preload_predictions_as_annotations',
-            message='entered prediction materialization',
-            data={'project_id': project_id, 'imported_task_count': len(imported_tasks)},
-        )
-        # endregion
-        prediction_by_relative: dict[str, list[dict[str, Any]]] = {}
-        for task in imported_tasks:
-            if not isinstance(task, dict):
+        """Create editable annotations from preload masks without importing predictions."""
+        annotation_results_by_relative: dict[str, list[dict[str, Any]]] = {}
+        for relative, prediction in preload_annotation_by_relative_path.items():
+            if not isinstance(relative, str) or not isinstance(prediction, dict):
                 continue
-            relative = task.get('data', {}).get('source_relative_path')
-            if not isinstance(relative, str) or not relative:
-                continue
-            predictions = task.get('predictions')
-            if not isinstance(predictions, list) or not predictions:
-                continue
-            first_prediction = predictions[0]
-            if not isinstance(first_prediction, dict):
-                continue
-            result = first_prediction.get('result')
+            result = prediction.get('result')
             if isinstance(result, list) and result:
-                prediction_by_relative[relative] = result
-        if not prediction_by_relative:
+                annotation_results_by_relative[relative] = _editable_annotation_results(
+                    result
+                )
+        if not annotation_results_by_relative:
             return
 
         materialized: list[dict[str, Any]] = []
@@ -964,10 +980,17 @@ class LabelStudioApiClient:
             if not isinstance(task, dict):
                 continue
             relative = task.get('data', {}).get('source_relative_path')
-            if not isinstance(relative, str) or relative not in prediction_by_relative:
+            if (
+                not isinstance(relative, str)
+                or relative not in annotation_results_by_relative
+            ):
                 continue
             total_annotations = int(task.get('total_annotations') or 0)
-            annotations = task.get('annotations') if isinstance(task.get('annotations'), list) else []
+            annotations = (
+                task.get('annotations')
+                if isinstance(task.get('annotations'), list)
+                else []
+            )
             if total_annotations > 0 or annotations:
                 # Respect existing manual work; do not auto-create duplicates.
                 materialized.append(
@@ -981,26 +1004,17 @@ class LabelStudioApiClient:
                 continue
             self._request_json(
                 'POST',
-                f"/api/tasks/{int(task.get('id'))}/annotations/",
-                {'result': prediction_by_relative[relative]},
+                f'/api/tasks/{int(task.get("id"))}/annotations/',
+                {'result': annotation_results_by_relative[relative]},
             )
             materialized.append(
                 {
                     'task_id': task.get('id'),
                     'relative_image_path': relative,
                     'action': 'created_annotation',
-                    'region_count': len(prediction_by_relative[relative]),
+                    'region_count': len(annotation_results_by_relative[relative]),
                 }
             )
-        # region agent log
-        _agent_debug_log(
-            run_id='pre-fix',
-            hypothesis_id='H3,H4',
-            location='src/eq/labelstudio/bootstrap.py:_materialize_preload_predictions_as_annotations',
-            message='finished prediction materialization',
-            data={'project_id': project_id, 'actions': materialized[:20]},
-        )
-        # endregion
 
     def _iter_project_tasks(self, project_id: int) -> Iterable[dict[str, Any]]:
         path = f'/api/tasks/?project={project_id}'
@@ -1032,6 +1046,45 @@ class LabelStudioApiClient:
                 path = str(next_path)
 
 
+def _editable_annotation_results(results: list[Any]) -> list[dict[str, Any]]:
+    editable_results: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        result = copy.deepcopy(item)
+        if result.get('type') == 'brushlabels':
+            _validate_editable_brush_result(result)
+            result['image_rotation'] = int(result.get('image_rotation') or 0)
+            result['origin'] = 'manual'
+        editable_results.append(result)
+    return editable_results
+
+
+def _validate_editable_brush_result(result: dict[str, Any]) -> None:
+    region_id = str(result.get('id') or '<missing-id>')
+    if result.get('original_width') is None or result.get('original_height') is None:
+        raise BootstrapError(
+            f'Preload brush region {region_id} cannot be materialized as an '
+            'editable annotation without original_width and original_height.'
+        )
+    value = result.get('value')
+    if not isinstance(value, dict):
+        raise BootstrapError(
+            f'Preload brush region {region_id} cannot be materialized as an '
+            'editable annotation without a value mapping.'
+        )
+    if value.get('format') != 'rle' or not isinstance(value.get('rle'), list):
+        raise BootstrapError(
+            f'Preload brush region {region_id} cannot be materialized as an '
+            'editable annotation without value.format=rle and list value.rle.'
+        )
+    if not isinstance(value.get('brushlabels'), list) or not value.get('brushlabels'):
+        raise BootstrapError(
+            f'Preload brush region {region_id} cannot be materialized as an '
+            'editable annotation without value.brushlabels.'
+        )
+
+
 def _list_response_items(response: Any) -> list[Any]:
     if isinstance(response, list):
         return response
@@ -1042,24 +1095,28 @@ def _list_response_items(response: Any) -> list[Any]:
 
 
 def _local_file_storage_paths(tasks: list[dict[str, Any]]) -> list[str]:
-    storage_paths: set[str] = set()
+    dataset_roots: set[str] = set()
     flat_files: list[str] = []
     for task in tasks:
         relative = task.get('data', {}).get('source_relative_path')
+        image_ref = task.get('data', {}).get('image')
         if not isinstance(relative, str):
             continue
         parts = Path(relative).parts
         if len(parts) < 2:
             flat_files.append(relative)
-            continue
-        storage_paths.add(f'{CONTAINER_LOCAL_FILES_ROOT}/{parts[0]}')
+        if isinstance(image_ref, str) and '?d=' in image_ref:
+            served_relative = image_ref.split('?d=', 1)[1]
+            served_parts = Path(served_relative).parts
+            if served_parts:
+                dataset_roots.add(f'{CONTAINER_LOCAL_FILES_ROOT}/{served_parts[0]}')
     if flat_files:
         examples = ', '.join(flat_files[:3])
         raise BootstrapError(
             'Label Studio local-file serving requires images to be inside at least one subfolder '
             f'under --images. Move flat image files into a subject/batch folder first. Examples: {examples}'
         )
-    return sorted(storage_paths)
+    return sorted(dataset_roots)
 
 
 def _write_task_manifest(plan: BootstrapPlan, tasks: list[dict[str, Any]]) -> None:

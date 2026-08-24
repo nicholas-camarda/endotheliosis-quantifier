@@ -32,6 +32,15 @@ The system SHALL preserve each imported image's relative path metadata so later 
 - **THEN** dry-run task generation includes `subject_hint = image_001`
 - **AND** full Label Studio API bootstrap fails with an actionable error requiring images to be placed in at least one subfolder under the supplied image directory
 
+### Requirement: Bootstrap SHALL preserve disconnected preload components as separate editable regions
+
+When a preload mask or comparison proof mask contains multiple disconnected glomerulus components for one image, bootstrap MUST emit separate brushlabel regions rather than one union-scored region so each ROI can receive its own grade.
+
+#### Scenario: One mask file contains multiple disconnected glomeruli
+- **WHEN** the preload source mask for a staged task contains multiple disconnected foreground components above the configured area threshold
+- **THEN** the generated Label Studio annotation payload MUST contain one `brushlabels` region per component with stable region ids
+- **AND** task-level preload lineage metadata MUST preserve one provenance entry per emitted region id for later export parsing
+
 ## ADDED Requirements
 
 ### Requirement: YAML-first configuration MUST govern hybrid preload and companion coupling
@@ -40,7 +49,22 @@ Hybrid MedSAM mask release identifiers, companion service endpoints, enforced he
 #### Scenario: Default collaborator profile
 - **WHEN** operators omit `--config`
 - **THEN** bootstrap reads `configs/label_studio_medsam_hybrid.yaml` resolved through `src/eq/utils/paths.py` helpers unless an explicit administrator override disables hybrid features
+- **AND** the default profile keeps `hybrid.preload_enabled: false` so the initial product demo uses box-assisted/manual grading without noisy full-image preload masks
 
 #### Scenario: Invalid YAML disables bootstrap
 - **WHEN** the YAML violates the documented hybrid schema (`mask_release_id` missing while hybrid enabled without offline allowance, malformed URLs)
 - **THEN** bootstrap terminates before Docker container creation or API imports with structured diagnostics referencing invalid keys only
+
+#### Scenario: Pinned release contradicts disabled preload
+- **WHEN** YAML sets `hybrid.preload_enabled: false` and also pins `hybrid.mask_release_id`
+- **THEN** bootstrap terminates before Docker container creation or API imports with an actionable configuration error
+
+### Requirement: Demo wrapper SHALL reuse local bootstrap behavior
+
+The `eq labelstudio demo-hybrid <image-dir>` command SHALL call the same bootstrap implementation as `eq labelstudio start` and MUST NOT introduce a second Docker, Label Studio API, or task-manifest construction path.
+
+#### Scenario: Demo dry-run mirrors start dry-run
+
+- **WHEN** an operator runs `eq labelstudio demo-hybrid <image-dir> --dry-run`
+- **THEN** image discovery, task manifest construction, YAML policy resolution, and companion status MUST match `eq labelstudio start <image-dir> --dry-run`
+- **AND** the demo command additionally writes acceptance evidence for handoff

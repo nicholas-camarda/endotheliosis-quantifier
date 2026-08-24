@@ -29,19 +29,39 @@
 
 **Alternative:** Eliminate positional support and keep `--images` only → rejected due to collaborator preference.
 
+### Decision: Finished-product demo command owns acceptance evidence
+
+**Choice:** Add `eq labelstudio demo-hybrid` as the showable workflow wrapper. It calls the same bootstrap implementation as `eq labelstudio start`, can stage a real MedSAM/manual comparison row from runtime evaluation outputs, writes `hybrid_demo_acceptance.json`, and records task manifest path, URL/project URL when live, companion policy, preload count/status, optional parsed export lineage summary from `--annotation-export`, and comparison-proof fields when a runtime-backed example is requested.
+
+**Alternative:** Keep README command snippets only → rejected because the user needs a finished product artifact that can be shown without reconstructing chat history.
+
+### Decision: Real-data proof reuses the manual-mask pilot contract
+
+**Choice:** The canonical proof example comes from `output/segmentation_evaluation/medsam_manual_glomeruli_comparison/<run_id>/`, reusing `inputs.csv`, `metrics.csv`, `medsam_masks/`, and `overlays/` instead of inventing a synthetic image or a second evaluation path. `demo-hybrid` stages one selected `manifest_row_id` into a single-image demo directory and preloads the corresponding MedSAM mask into Label Studio.
+
+**Alternative:** Invent a synthetic image or use an unrelated generated-mask release → rejected because it does not prove MedSAM behavior against known ground truth.
+
+### Decision: Multi-ROI proof stays per-component end to end
+
+**Choice:** When a preload or proof mask contains multiple disconnected glomerulus components in one image, bootstrap splits them into separate `brushlabels` regions with stable ids, task-level provenance keeps one lineage entry per region id, and export ingestion emits one scored glomerulus-instance row per region rather than collapsing them into one union row.
+
+**Alternative:** Treat the union mask as one scored ROI → rejected because it breaks per-glomerulus grading semantics and hides the exact production edge case that previously mattered.
+
 ### Decision: YAML carries integration bindings
 
-**Choice:** Provide `configs/label_studio_medsam_hybrid.yaml` documenting release-selection policy (`selection_mode: latest_valid` by default), optional pinned `mask_release_id`, ML companion base URL, auth token reference (env-backed), Docker/LS defaults, hybrid enablement.
+**Choice:** Provide `configs/label_studio_medsam_hybrid.yaml` documenting release-selection policy (`selection_mode: latest_valid`), explicit `preload_enabled`, optional pinned `mask_release_id`, ML companion base URL, auth token reference (env-backed), Docker/LS defaults, hybrid enablement.
 
 **Alternative:** Environment variables exclusively → simpler shell but brittle for onboarding; YAML remains authoritative with optional overrides.
 
-### Decision: Two-phase MedSAM ingestion
+### Decision: Native editable MedSAM annotation ingestion
 
-**Choice:** Offline ingestion maps release manifest polygons/masks onto Label Studio `predictions`/preannotations; interactive path calls companion HTTP JSON contract with minimal payload (bbox, image locator, checkpoint ref).
+**Choice:** Offline ingestion maps release manifest masks to task-level lineage metadata and creates editable Label Studio brush annotations through the annotation API when `preload_enabled: true`; it does not import those masks through Label Studio `predictions`. Interactive box assist uses the companion HTTP contract `GET /healthz` and `POST /v1/box_infer` with minimal payload (`image_path`, `box_xyxy`).
 
 **Alternative:** Only synchronous companion generation → brittle for laptops; preload gives instant UX when release exists.
 
 **Operator intent:** **Box-assist** is the high-value path for **images or glomeruli not yet covered** by a mask release (cold coverage). **Preload** accelerates **known** images and MUST remain compatible with **repeat review** of the same tasks (QA, grade updates, boundary fixes)—the workflow is not limited to one-and-done preload consumption.
+
+**Default product posture:** full-image preload is disabled in the default YAML because current release masks can be noisy as operator-facing instance proposals. Preload is an explicit admin opt-in (`preload_enabled: true`) after a target release passes instance-quality checks.
 
 ### Decision: Operational posture for companion unavailability
 
@@ -69,6 +89,7 @@ Extend `glomerulus_grading.py` parsers (or refactor into shared labelstudio cont
 - **[Risk]** Over-specifying ML HTTP schema before companion exists → mitigation: stabilize minimal request/response in spec with explicit extension points flagged `[defer_ok]` for batching/gpu fields.
 - **[Risk]** Preload polygons misaligned vs displayed image → mitigation: deterministic coordinate normalization tests + QA overlay snapshot hook.
 - **[Risk]** Admin bypass flags inadvertently used in production datasets → mitigation: fail-closed default; bypass requires YAML opt-in loudly logged.
+- **[Risk]** A cherry-picked real-data example can mislead if it is not traceable → mitigation: acceptance artifacts must name the exact `manifest_row_id`, source paths, method, and same-row current-segmenter comparator metrics.
 
 ## Migration Plan
 
@@ -80,13 +101,17 @@ Extend `glomerulus_grading.py` parsers (or refactor into shared labelstudio cont
 ## Explicit Decisions
 
 - Collaborator advertised command: `**eq labelstudio start <image-dir>`**.
+- Demonstration/handoff command: `eq labelstudio demo-hybrid <image-dir>`.
+- Real-data proof command extension: `eq labelstudio demo-hybrid --comparison-run-dir <run-dir> --comparison-manifest-row-id <manifest_row_id>`.
+- Acceptance artifact: `<runtime-root>/labelstudio/acceptance/<safe-project-name>_hybrid_demo_acceptance.json` unless overridden with `--acceptance-dir`.
 - Default integration settings file path: `**configs/label_studio_medsam_hybrid.yaml`**.
+- Default startup policy: hybrid companion required, full-image preload disabled unless `hybrid.preload_enabled: true`.
 - Cold start policy (**B**) remains: zero preload masks must NOT block importing tasks.
 - Box-assist default posture: hybrid mode refuses open without healthy companion unless `offline_manual_only_allowed: true`.
 - **Canonical region primitive for human refinement** is **brush** (`brushlabels` in the grading XML): graders edit MedSAM-derived geometry with the brush; box-assist is an **input modality to MedSAM**, not a replacement for brush-finalized masks.
+- Real-data proof artifact fields SHALL include: `comparison_run_dir`, `comparison_run_id`, `manifest_row_id`, `cohort_id`, `lane_assignment`, `source_image_path`, `manual_mask_path`, `prediction_mask_path`, `overlay_path`, per-method same-row metrics, and a boolean summary of whether MedSAM outperformed the current segmenters on that row.
+- Multi-ROI proof contract: disconnected components in one staged image remain separate preloaded regions, can each receive a grade, and must parse back into one authoritative row per region with preserved `auto_preload` lineage.
 
 ## Open Questions
 
-- [audit_first_then_decide] Which Label Studio data structure (`predictions`, `annotations`, imported storage) best carries vector masks for multi-region preload for our pinned image version — audit exported JSON from pilot container tasks.
-- [defer_ok] Exact HTTP companion contract paths (`/healthz`, `/v1/box_infer`, etc.) — finalize when scaffolding the companion service.
 - [defer_ok] Compose packaging versus standalone script to launch the companion beside the Label Studio container — operational convenience only.

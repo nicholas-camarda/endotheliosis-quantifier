@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,12 @@ def _records_for_annotation(
     annotation_id = str(annotation.get('id', ''))
     result = annotation.get('result') or []
     prediction_regions = _prediction_regions(task)
-    task_mask_release_id = str(task.get('data', {}).get('mask_release_id') or '').strip()
+    task_mask_release_id = str(
+        task.get('data', {}).get('mask_release_id') or ''
+    ).strip()
+    task_preload_region_lineage = task.get('data', {}).get('preload_region_lineage')
+    if not isinstance(task_preload_region_lineage, dict):
+        task_preload_region_lineage = {}
     parent_prediction_id = str(annotation.get('parent_prediction') or '').strip()
     regions: dict[str, dict[str, Any]] = {}
     grades: dict[str, list[dict[str, Any]]] = {}
@@ -88,9 +94,13 @@ def _records_for_annotation(
         if _is_glomerulus_region(item):
             regions[item_id] = item
         elif _is_grade_result(item):
-            grades.setdefault(item_id, []).append(item)
-            if item_id not in regions:
-                unlinked_grades.append(item)
+            parent_region_id = str(
+                item.get('parentID') or item.get('parent_id') or item_id
+            ).strip()
+            grades.setdefault(parent_region_id, []).append(item)
+    for parent_region_id, grade_items in grades.items():
+        if parent_region_id not in regions:
+            unlinked_grades.extend(grade_items)
 
     if unlinked_grades and not regions:
         raise LabelStudioGlomerulusContractError(
@@ -135,13 +145,18 @@ def _records_for_annotation(
 
         completeness_status = 'complete' if is_complete else 'excluded'
         exclusion_reason = CUTOFF_PARTIAL_GLOMERULUS_LABEL if is_cutoff else ''
-        record_id = _record_id(image_id, region_id, annotation_id, grader['grader_user_id'])
-        proposal_kind, region_edit_state, mask_release_id, mask_source = _lineage_for_region(
-            region_id=region_id,
-            region=region,
-            prediction_regions=prediction_regions,
-            task_mask_release_id=task_mask_release_id,
-            parent_prediction_id=parent_prediction_id,
+        record_id = _record_id(
+            image_id, region_id, annotation_id, grader['grader_user_id']
+        )
+        proposal_kind, region_edit_state, mask_release_id, mask_source = (
+            _lineage_for_region(
+                region_id=region_id,
+                region=region,
+                prediction_regions=prediction_regions,
+                task_mask_release_id=task_mask_release_id,
+                task_preload_region_lineage=task_preload_region_lineage,
+                parent_prediction_id=parent_prediction_id,
+            )
         )
         rows.append(
             {
@@ -200,8 +215,48 @@ def _lineage_for_region(
     region: dict[str, Any],
     prediction_regions: dict[str, tuple[dict[str, Any], str]],
     task_mask_release_id: str,
+    task_preload_region_lineage: dict[str, Any],
     parent_prediction_id: str,
 ) -> tuple[str, str, str, str]:
+    origin = str(region.get('origin') or '').strip()
+    preload_lineage = task_preload_region_lineage.get(region_id)
+    if not isinstance(preload_lineage, dict):
+        preload_lineage = {}
+    preload_origin = str(preload_lineage.get('origin') or '').strip()
+    if preload_origin == 'auto_preload':
+        mask_release_id = str(
+            region.get('mask_release_id')
+            or preload_lineage.get('mask_release_id')
+            or task_mask_release_id
+        ).strip()
+        if not mask_release_id:
+            raise LabelStudioGlomerulusContractError(
+                f'contradictory-lineage for region {region_id}: '
+                'proposal_kind=auto_preload requires mask_release_id'
+            )
+        stored_signature = str(
+            region.get('preload_geometry_signature')
+            or preload_lineage.get('preload_geometry_signature')
+            or ''
+        ).strip()
+        current_signature = _geometry_signature(region)
+        region_edit_state = (
+            'unedited_auto'
+            if stored_signature and stored_signature == current_signature
+            else 'human_refined_boundary'
+        )
+        return (
+            'auto_preload',
+            region_edit_state,
+            mask_release_id,
+            str(
+                region.get('mask_source')
+                or preload_lineage.get('mask_source')
+                or 'medsam_finetuned_glomeruli'
+            ).strip(),
+        )
+    if not origin:
+        origin = preload_origin
     predicted = prediction_regions.get(region_id)
     if predicted is not None:
         prediction_region, model_version = predicted
@@ -250,7 +305,7 @@ def _geometry_signature(result: dict[str, Any]) -> str:
         'polygonlabels': value.get('polygonlabels'),
         'rectanglelabels': value.get('rectanglelabels'),
     }
-    return str(geometry)
+    return json.dumps(geometry, sort_keys=True)
 
 
 def _grader_provenance(annotation: dict[str, Any]) -> dict[str, str]:
@@ -288,7 +343,9 @@ def _is_glomerulus_region(result: dict[str, Any]) -> bool:
 
 
 def _is_grade_result(result: dict[str, Any]) -> bool:
-    return result.get('type') == 'choices' and result.get('from_name') == GRADE_FROM_NAME
+    return (
+        result.get('type') == 'choices' and result.get('from_name') == GRADE_FROM_NAME
+    )
 
 
 def _region_labels(result: dict[str, Any]) -> list[str]:

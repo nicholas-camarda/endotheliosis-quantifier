@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from label_studio_converter.brush import decode_rle as decode_labelstudio_brush_rle
 from PIL import Image, ImageDraw
 from sklearn.metrics import (
     accuracy_score,
@@ -39,6 +38,7 @@ from eq.data_management.metadata_processor import MetadataProcessor
 from eq.data_management.model_loading import load_model_safely
 from eq.evaluation.quantification_metrics import calculate_quantification_metrics
 from eq.inference.prediction_core import create_prediction_core
+from eq.labelstudio.brush_rle import decode_rle as decode_labelstudio_brush_rle
 from eq.labelstudio.glomerulus_grading import (
     LabelStudioGlomerulusContractError,
     load_glomerulus_grading_records,

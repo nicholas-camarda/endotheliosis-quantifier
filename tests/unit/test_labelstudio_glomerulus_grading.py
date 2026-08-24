@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -41,9 +42,22 @@ def test_rejects_grade_without_region_link():
         LabelStudioGlomerulusContractError,
         match='grade-to-region linkage|legacy baseline',
     ):
-        load_glomerulus_grading_records(
-            FIXTURE_DIR / 'missing_region_link_export.json'
-        )
+        load_glomerulus_grading_records(FIXTURE_DIR / 'missing_region_link_export.json')
+
+
+def test_links_grade_results_by_parent_id(tmp_path: Path):
+    source = json.loads(
+        (FIXTURE_DIR / 'valid_multi_glomerulus_export.json').read_text(encoding='utf-8')
+    )
+    grade = source[0]['annotations'][0]['result'][1]
+    grade['id'] = 'grade_glom_a'
+    grade['parentID'] = 'glom_a'
+    path = tmp_path / 'parent_id_grade_export.json'
+    path.write_text(json.dumps(source), encoding='utf-8')
+
+    records = load_glomerulus_grading_records(path)
+    assert records.loc[0, 'region_id'] == 'glom_a'
+    assert records.loc[0, 'human_grade'] == 0.5
 
 
 def test_rejects_cutoff_region_with_grade():
@@ -110,3 +124,49 @@ def test_rejects_contradictory_hybrid_lineage():
         load_glomerulus_grading_records(
             FIXTURE_DIR / 'hybrid_contradictory_lineage_export.json'
         )
+
+
+def test_auto_preload_lineage_survives_materialized_annotation_without_predictions(
+    tmp_path: Path,
+):
+    source = json.loads(
+        (FIXTURE_DIR / 'hybrid_auto_refined_export.json').read_text(encoding='utf-8')
+    )
+    task = source[0]
+    task.pop('predictions', None)
+    region = task['annotations'][0]['result'][0]
+    region['origin'] = 'manual'
+    task['data']['preload_region_lineage'] = {
+        region['id']: {
+            'origin': 'auto_preload',
+            'mask_release_id': 'deploy_conservative_mps_glomeruli',
+            'mask_source': 'medsam_finetuned_glomeruli',
+            'preload_geometry_signature': (
+                '{"brushlabels": ["complete_glomerulus"], "format": "rle", '
+                '"points": null, "polygonlabels": null, "rectanglelabels": null, '
+                '"rle": [0, 8, 1, 7]}'
+            ),
+        }
+    }
+    path = tmp_path / 'materialized_auto_preload_export.json'
+    path.write_text(json.dumps(source), encoding='utf-8')
+
+    records = load_glomerulus_grading_records(path)
+    row = records.iloc[0]
+    assert row['proposal_kind'] == 'auto_preload'
+    assert row['mask_release_id'] == 'deploy_conservative_mps_glomeruli'
+    assert row['region_edit_state'] == 'unedited_auto'
+
+
+def test_live_multi_roi_export_preserves_three_scored_auto_preload_regions():
+    records = load_glomerulus_grading_records(
+        FIXTURE_DIR / 'hybrid_multi_roi_live_export.json'
+    )
+
+    assert len(records) == 3
+    assert list(records['human_grade']) == [0.5, 2.0, 1.0]
+    assert set(records['proposal_kind']) == {'auto_preload'}
+    assert set(records['region_edit_state']) == {'unedited_auto'}
+    assert set(records['mask_release_id']) == {
+        'medsam_manual_glomeruli_comparison:pilot_medsam_manual_glomeruli_comparison:medsam_oracle'
+    }

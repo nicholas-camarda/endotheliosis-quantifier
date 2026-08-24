@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from label_studio_converter.brush import mask2rle
 from PIL import Image
 
 import eq.quantification.pipeline as quant_pipeline
+from eq.labelstudio.brush_rle import decode_rle, mask2rle
 from eq.quantification.labelstudio_scores import (
     LabelStudioScoreError,
     discover_label_studio_annotation_source,
@@ -45,8 +45,8 @@ def _make_rect_mask(
 
 def test_build_scored_table_and_extract_rois(tmp_path: Path):
     project_dir = tmp_path / 'project'
-    image_dir = project_dir / 'images' / 'T40'
-    mask_dir = project_dir / 'masks' / 'T40'
+    image_dir = project_dir / 'images' / 'T19'
+    mask_dir = project_dir / 'masks' / 'T19'
     image_dir.mkdir(parents=True)
     mask_dir.mkdir(parents=True)
 
@@ -345,6 +345,18 @@ def test_instance_scored_table_drops_zero_area_regions(tmp_path: Path, monkeypat
     assert len(table) == 1
     assert table.loc[0, 'glomerulus_instance_id'] == 'glom_keep'
     assert Path(str(table.loc[0, 'raw_mask_path'])).exists()
+
+
+def test_local_labelstudio_brush_rle_roundtrip_preserves_alpha_mask():
+    mask = np.zeros((32, 32), dtype=np.uint8)
+    mask[4:18, 7:23] = 255
+    mask[20:29, 3:11] = 255
+
+    rle = mask2rle(mask)
+    decoded = decode_rle(rle).reshape((32, 32, 4))
+
+    assert decoded.dtype == np.uint8
+    assert np.array_equal(decoded[:, :, 3], mask)
 
 
 def test_prepare_quantification_contract_writes_instance_lineage_summary(tmp_path: Path):

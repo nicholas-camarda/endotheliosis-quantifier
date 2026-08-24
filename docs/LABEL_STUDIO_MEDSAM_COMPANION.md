@@ -18,13 +18,16 @@ This companion exposes real MedSAM box-prompt inference over HTTP for hybrid Lab
 
 ## Launch on macOS (`eq-mac`, MPS)
 
+Set `EQ_SOURCE_ROOT` to the source checkout and `EQ_RUNTIME_ROOT` to the active
+runtime tree before launching the companion.
+
 Default development launch:
 
 ```bash
-cd /Users/ncamarda/Projects/endotheliosis_quantifier
+cd "$EQ_SOURCE_ROOT"
 conda activate eq-mac
-PYTORCH_ENABLE_MPS_FALLBACK=1 /Users/ncamarda/mambaforge/envs/eq-mac/bin/python -m eq.labelstudio.medsam_companion \
-  --checkpoint /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth \
+PYTORCH_ENABLE_MPS_FALLBACK=1 python -m eq.labelstudio.medsam_companion \
+  --checkpoint "$EQ_RUNTIME_ROOT/output/segmentation_evaluation/medsam_glomeruli_fine_tuning/deploy_conservative_mps_glomeruli/finetuned_evaluation/medsam_glomeruli_best_sam_state_dict.pth" \
   --device mps \
   --port 8098
 ```

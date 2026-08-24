@@ -1,7 +1,11 @@
 hybrid:
   enabled: true
+  # Default demo posture is box-assist/manual-first. Enable only after a release
+  # passes operator-facing instance-quality checks for the target image set.
+  preload_enabled: false
   selection_mode: latest_valid
-  # Leave empty to auto-select latest valid release from derived_data/generated_masks/glomeruli/manifest.csv
+  # Used only when preload_enabled is true. Leave empty to auto-select the latest
+  # valid release from derived_data/generated_masks/glomeruli/manifest.csv.
   mask_release_id: ""
   require_box_assisted_medsam: true
   offline_manual_only_allowed: false

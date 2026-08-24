@@ -18,16 +18,17 @@ from .migration import (
     migrate_raw_project_to_canonical,
 )
 from .ordinal import CanonicalOrdinalClassifier, run_grouped_ordinal_experiment
-from .pipeline import (
-    prepare_quantification_contract,
-    run_contract_first_quantification,
-    run_endotheliosis_scoring_pipeline,
-)
 from .roi import extract_rois_for_scored_examples
 from .severe_aware_ordinal_estimator import (
     evaluate_severe_aware_ordinal_endotheliosis_estimator,
 )
 from .source_aware_estimator import evaluate_source_aware_endotheliosis_estimator
+
+_PIPELINE_EXPORTS = {
+    'prepare_quantification_contract',
+    'run_contract_first_quantification',
+    'run_endotheliosis_scoring_pipeline',
+}
 
 __all__ = [
     'inventory_raw_project',
@@ -53,3 +54,11 @@ __all__ = [
     'run_contract_first_quantification',
     'run_endotheliosis_scoring_pipeline',
 ]
+
+
+def __getattr__(name: str):
+    if name in _PIPELINE_EXPORTS:
+        from . import pipeline
+
+        return getattr(pipeline, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
