@@ -32,6 +32,35 @@ def _write_png(path: Path, arr: np.ndarray) -> None:
     Image.fromarray((arr > 0).astype(np.uint8) * 255).save(path)
 
 
+def _metric_evidence_context(manifest_row_ids: list[str]) -> dict[str, object]:
+    return {
+        "run_id": "run-1",
+        "fixed_split": "test",
+        "fixed_manifest_row_ids": manifest_row_ids,
+    }
+
+
+def _write_metric_evidence_csv(
+    path: Path,
+    *,
+    manifest_row_ids: list[str],
+    method: str,
+    dice: float,
+    jaccard: float,
+) -> None:
+    pd.DataFrame(
+        [
+            {
+                "manifest_row_id": manifest_row_id,
+                "method": method,
+                "dice": dice,
+                "jaccard": jaccard,
+            }
+            for manifest_row_id in manifest_row_ids
+        ]
+    ).to_csv(path, index=False)
+
+
 def test_fixed_split_generation_keeps_source_groups_together():
     rows = pd.DataFrame(
         [
@@ -155,12 +184,21 @@ def test_finetuned_comparison_uses_selected_oracle_metrics_csv_when_external_bas
 ) -> None:
     oracle_metrics_csv = tmp_path / "oracle_metrics.csv"
     finetuned_metrics_csv = tmp_path / "finetuned_metrics.csv"
-    pd.DataFrame(
-        [{"dice": 0.921631295838860, "jaccard": 0.86}] * 42
-    ).to_csv(oracle_metrics_csv, index=False)
-    pd.DataFrame(
-        [{"dice": 0.815511056209316, "jaccard": 0.72}] * 42
-    ).to_csv(finetuned_metrics_csv, index=False)
+    manifest_row_ids = [f"row-{index}" for index in range(42)]
+    _write_metric_evidence_csv(
+        oracle_metrics_csv,
+        manifest_row_ids=manifest_row_ids,
+        method="medsam_oracle",
+        dice=0.921631295838860,
+        jaccard=0.86,
+    )
+    _write_metric_evidence_csv(
+        finetuned_metrics_csv,
+        manifest_row_ids=manifest_row_ids,
+        method="medsam_finetuned_automatic",
+        dice=0.815511056209316,
+        jaccard=0.72,
+    )
 
     comparison = _build_finetuned_comparison_summary(
         finetuned_evaluation={
@@ -168,10 +206,12 @@ def test_finetuned_comparison_uses_selected_oracle_metrics_csv_when_external_bas
             "metrics_csv": str(finetuned_metrics_csv),
             "overlay_review_status": "passed",
             "prompt_failure_count": 0,
+            **_metric_evidence_context(manifest_row_ids),
         },
         external_baselines_summary={
             "status": "skipped_config",
             "oracle_medsam_metrics_csv": str(oracle_metrics_csv),
+            **_metric_evidence_context(manifest_row_ids),
         },
         baseline_outputs={},
         adoption_gates={},
@@ -192,6 +232,91 @@ def test_finetuned_comparison_uses_selected_oracle_metrics_csv_when_external_bas
     assert comparison["metric_evidence"]["fine_tuned"]["sample_count"] == 42
     assert len(comparison["metric_evidence"]["oracle"]["sha256"]) == 64
     assert len(comparison["metric_evidence"]["fine_tuned"]["sha256"]) == 64
+
+
+def test_finetuned_comparison_blocks_mismatched_fixed_split_metric_evidence(
+    tmp_path: Path,
+) -> None:
+    finetuned_metrics_csv = tmp_path / "finetuned_metrics.csv"
+    oracle_metrics_csv = tmp_path / "oracle_metrics.csv"
+    finetuned_ids = ["row-1", "row-2"]
+    oracle_ids = ["other-1", "other-2"]
+    _write_metric_evidence_csv(
+        finetuned_metrics_csv,
+        manifest_row_ids=finetuned_ids,
+        method="medsam_finetuned_automatic",
+        dice=0.91,
+        jaccard=0.84,
+    )
+    _write_metric_evidence_csv(
+        oracle_metrics_csv,
+        manifest_row_ids=oracle_ids,
+        method="medsam_oracle",
+        dice=0.94,
+        jaccard=0.86,
+    )
+
+    comparison = _build_finetuned_comparison_summary(
+        finetuned_evaluation={
+            "status": "completed",
+            "metrics_csv": str(finetuned_metrics_csv),
+            "overlay_review_status": "passed",
+            "prompt_failure_count": 0,
+            **_metric_evidence_context(finetuned_ids),
+        },
+        external_baselines_summary={
+            "oracle_medsam_metrics_csv": str(oracle_metrics_csv),
+            **_metric_evidence_context(oracle_ids),
+        },
+        baseline_outputs={},
+        adoption_gates={},
+    )
+
+    assert comparison["status"] == "blocked"
+    assert "oracle_metric_evidence_provenance_mismatch" in comparison["reason_codes"]
+
+
+def test_finetuned_comparison_blocks_shared_oracle_automatic_artifact_and_wrong_method(
+    tmp_path: Path,
+) -> None:
+    shared_metrics_csv = tmp_path / "oracle_metrics.csv"
+    finetuned_metrics_csv = tmp_path / "finetuned_metrics.csv"
+    manifest_row_ids = ["row-1", "row-2"]
+    _write_metric_evidence_csv(
+        shared_metrics_csv,
+        manifest_row_ids=manifest_row_ids,
+        method="medsam_oracle",
+        dice=0.94,
+        jaccard=0.86,
+    )
+    _write_metric_evidence_csv(
+        finetuned_metrics_csv,
+        manifest_row_ids=manifest_row_ids,
+        method="medsam_finetuned_automatic",
+        dice=0.91,
+        jaccard=0.84,
+    )
+
+    comparison = _build_finetuned_comparison_summary(
+        finetuned_evaluation={
+            "status": "completed",
+            "metrics_csv": str(finetuned_metrics_csv),
+            "overlay_review_status": "passed",
+            "prompt_failure_count": 0,
+            **_metric_evidence_context(manifest_row_ids),
+        },
+        external_baselines_summary={
+            "oracle_medsam_metrics_csv": str(shared_metrics_csv),
+            "automatic_medsam_metrics_csv": str(shared_metrics_csv),
+            **_metric_evidence_context(manifest_row_ids),
+        },
+        baseline_outputs={},
+        adoption_gates={},
+    )
+
+    assert comparison["status"] == "blocked"
+    assert "automatic_oracle_metric_artifact_not_distinct" in comparison["reason_codes"]
+    assert "automatic_medsam_metric_method_mismatch" in comparison["reason_codes"]
 
 
 def test_finetuned_comparison_blocks_when_oracle_metric_evidence_is_unavailable(
@@ -728,6 +853,12 @@ def test_workflow_summary_marks_finetuned_evaluation_completed_when_real_inferen
     assert comparison["failure_mode"] == "metric_evidence_unavailable"
     assert "oracle_metric_evidence_unavailable" in comparison["reason_codes"]
     assert comparison["failed_gates"]
+    assert summary["generated_mask_packaging"]["status"] == "skipped_comparison_not_eligible"
+    assert not (
+        runtime_root
+        / "derived_data/generated_masks/glomeruli/medsam_finetuned/test-run"
+    ).exists()
+    assert not (runtime_root / "derived_data/generated_masks/glomeruli/manifest.csv").exists()
 
 
 def test_workflow_summary_fails_closed_when_finetuned_inference_is_partial(

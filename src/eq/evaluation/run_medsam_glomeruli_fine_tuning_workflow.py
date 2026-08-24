@@ -896,12 +896,41 @@ def _unavailable_metric_evidence(
     label: str,
     reason: str,
     artifact_path: str = "",
+    reason_code: str = "",
+    artifact_sha256: str = "",
+    sample_count: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    evidence: dict[str, Any] = {
         "status": "unavailable",
         "reason": reason,
-        "reason_code": f"{label}_metric_evidence_unavailable",
+        "reason_code": reason_code or f"{label}_metric_evidence_unavailable",
         "artifact_path": artifact_path,
+    }
+    if artifact_sha256:
+        evidence["sha256"] = artifact_sha256
+    if sample_count is not None:
+        evidence["sample_count"] = sample_count
+    return evidence
+
+
+def _metric_evidence_provenance(source: dict[str, Any]) -> dict[str, Any] | None:
+    run_id = str(source.get("run_id", "")).strip()
+    fixed_split = str(source.get("fixed_split", "")).strip()
+    row_ids_value = source.get("fixed_manifest_row_ids")
+    if (
+        not run_id
+        or not fixed_split
+        or not isinstance(row_ids_value, list)
+        or not row_ids_value
+    ):
+        return None
+    row_ids = [str(value).strip() for value in row_ids_value]
+    if any(not value for value in row_ids) or len(set(row_ids)) != len(row_ids):
+        return None
+    return {
+        "run_id": run_id,
+        "fixed_split": fixed_split,
+        "fixed_manifest_row_ids": sorted(row_ids),
     }
 
 
@@ -910,6 +939,10 @@ def _load_metric_evidence(
     *,
     label: str,
     aggregation: str,
+    provenance_source: dict[str, Any],
+    expected_provenance: dict[str, Any] | None,
+    expected_methods: set[str] | None = None,
+    expected_method_prefix: str = "",
 ) -> dict[str, Any]:
     artifact_text = str(artifact_path or "").strip()
     if not artifact_text:
@@ -932,11 +965,14 @@ def _load_metric_evidence(
             reason="Selected metric CSV artifact cannot be read.",
             artifact_path=str(path),
         )
-    required_columns = {"dice", "jaccard"}
+    required_columns = {"manifest_row_id", "method", "dice", "jaccard"}
     if frame.empty or not required_columns.issubset(frame.columns):
         return _unavailable_metric_evidence(
             label=label,
-            reason="Selected metric CSV artifact lacks usable Dice/Jaccard rows.",
+            reason=(
+                "Selected metric CSV artifact lacks usable method, row identity, "
+                "or Dice/Jaccard rows."
+            ),
             artifact_path=str(path),
         )
     metrics = frame[["dice", "jaccard"]].apply(pd.to_numeric, errors="coerce")
@@ -946,10 +982,63 @@ def _load_metric_evidence(
             reason="Selected metric CSV artifact contains missing or non-finite Dice/Jaccard values.",
             artifact_path=str(path),
         )
+    artifact_sha256 = _hash_file(path)
+    sample_count = int(len(metrics))
+    actual_provenance = _metric_evidence_provenance(provenance_source)
+    artifact_row_ids = sorted(
+        {str(value).strip() for value in frame["manifest_row_id"].tolist()}
+    )
+    if (
+        expected_provenance is None
+        or actual_provenance is None
+        or not artifact_row_ids
+    ):
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Metric evidence run and fixed-split provenance is unavailable.",
+            reason_code=f"{label}_metric_evidence_provenance_unavailable",
+            artifact_path=str(path),
+            artifact_sha256=artifact_sha256,
+            sample_count=sample_count,
+        )
+    if (
+        actual_provenance != expected_provenance
+        or artifact_row_ids != actual_provenance["fixed_manifest_row_ids"]
+    ):
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Metric evidence does not match the evaluation run and fixed split.",
+            reason_code=f"{label}_metric_evidence_provenance_mismatch",
+            artifact_path=str(path),
+            artifact_sha256=artifact_sha256,
+            sample_count=sample_count,
+        )
+    methods = {str(value).strip() for value in frame["method"].tolist()}
+    method_matches = True
+    if expected_methods is not None:
+        method_matches = methods == expected_methods
+    elif expected_method_prefix:
+        method_matches = bool(methods) and all(
+            method.startswith(expected_method_prefix) for method in methods
+        )
+    if not method_matches:
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Metric evidence method provenance does not match its comparison lane.",
+            reason_code=f"{label}_metric_method_mismatch",
+            artifact_path=str(path),
+            artifact_sha256=artifact_sha256,
+            sample_count=sample_count,
+        )
     if aggregation == "mean":
         aggregate = metrics.mean()
-    elif aggregation == "max":
-        aggregate = metrics.max()
+    elif aggregation == "max_method_mean":
+        aggregate = (
+            frame.assign(dice=metrics["dice"], jaccard=metrics["jaccard"])
+            .groupby("method", dropna=False)[["dice", "jaccard"]]
+            .mean()
+            .max()
+        )
     else:
         raise ValueError(f"Unsupported metric aggregation: {aggregation}")
     return {
@@ -957,8 +1046,10 @@ def _load_metric_evidence(
         "reason": "",
         "reason_code": "",
         "artifact_path": str(path),
-        "sha256": _hash_file(path),
-        "sample_count": int(len(metrics)),
+        "sha256": artifact_sha256,
+        "sample_count": sample_count,
+        "provenance": actual_provenance,
+        "methods": sorted(methods),
         "metrics": {
             "dice": float(aggregate["dice"]),
             "jaccard": float(aggregate["jaccard"]),
@@ -973,37 +1064,76 @@ def _build_finetuned_comparison_summary(
     baseline_outputs: dict[str, Any],
     adoption_gates: dict[str, Any],
 ) -> dict[str, Any]:
+    expected_provenance = _metric_evidence_provenance(finetuned_evaluation)
     metric_evidence = {
         "fine_tuned": _load_metric_evidence(
             finetuned_evaluation.get("metrics_csv", ""),
             label="fine_tuned",
             aggregation="mean",
+            provenance_source=finetuned_evaluation,
+            expected_provenance=expected_provenance,
+            expected_methods={"medsam_finetuned_automatic"},
         ),
         "oracle": _load_metric_evidence(
             external_baselines_summary.get("oracle_medsam_metrics_csv", ""),
             label="oracle",
             aggregation="mean",
+            provenance_source=external_baselines_summary,
+            expected_provenance=expected_provenance,
+            expected_methods={"medsam_oracle"},
         ),
         "automatic_medsam": _load_metric_evidence(
             external_baselines_summary.get("automatic_medsam_metrics_csv", ""),
             label="automatic_medsam",
             aggregation="mean",
+            provenance_source=external_baselines_summary,
+            expected_provenance=expected_provenance,
+            expected_methods={"medsam_automatic"},
         ),
         "current_segmenter": _load_metric_evidence(
             external_baselines_summary.get("current_segmenter_metrics_csv", ""),
             label="current_segmenter",
             aggregation="mean",
+            provenance_source=external_baselines_summary,
+            expected_provenance=expected_provenance,
+            expected_method_prefix="current_segmenter_",
         ),
         "trivial_baseline": _load_metric_evidence(
-            baseline_outputs.get("trivial_baseline_metric_by_source", ""),
+            baseline_outputs.get("trivial_baseline_metrics", ""),
             label="trivial_baseline",
-            aggregation="max",
+            aggregation="max_method_mean",
+            provenance_source=baseline_outputs,
+            expected_provenance=expected_provenance,
+            expected_methods={"trivial_all_background", "trivial_all_foreground"},
         ),
     }
-    unavailable = [
+    evidence_failures = [
         evidence for evidence in metric_evidence.values()
         if evidence["status"] != "available"
     ]
+    oracle_evidence = metric_evidence["oracle"]
+    automatic_evidence = metric_evidence["automatic_medsam"]
+    if (
+        oracle_evidence.get("artifact_path")
+        and automatic_evidence.get("artifact_path")
+        and (
+            Path(str(oracle_evidence["artifact_path"])).resolve()
+            == Path(str(automatic_evidence["artifact_path"])).resolve()
+            or (
+                oracle_evidence.get("sha256")
+                and oracle_evidence.get("sha256") == automatic_evidence.get("sha256")
+            )
+        )
+    ):
+        evidence_failures.append(
+            {
+                "status": "unavailable",
+                "reason": (
+                    "Automatic and oracle metric evidence must use distinct artifacts."
+                ),
+                "reason_code": "automatic_oracle_metric_artifact_not_distinct",
+            }
+        )
     finetuned_status = str(finetuned_evaluation.get("status", ""))
     if finetuned_status != "completed":
         return {
@@ -1023,8 +1153,12 @@ def _build_finetuned_comparison_summary(
             "recommended_generated_mask_source": "",
             "failure_mode": finetuned_status or "finetuned_inference_not_run",
         }
-    if unavailable:
-        reason_codes = [str(evidence["reason_code"]) for evidence in unavailable]
+    if evidence_failures:
+        reason_codes = list(
+            dict.fromkeys(
+                str(evidence["reason_code"]) for evidence in evidence_failures
+            )
+        )
         comparison: dict[str, Any] = {
             "status": "blocked",
             "reason": "Required metric evidence is unavailable.",
@@ -1035,7 +1169,7 @@ def _build_finetuned_comparison_summary(
                     "reason_code": str(evidence["reason_code"]),
                     "reason": str(evidence["reason"]),
                 }
-                for evidence in unavailable
+                for evidence in evidence_failures
             ],
             "metric_evidence": metric_evidence,
             "adoption_tier": "blocked",
@@ -1911,6 +2045,17 @@ def run_medsam_glomeruli_fine_tuning_workflow(
     )
     training_cfg = _mapping(config, "training")
     fixed_rows = _fixed_evaluation_rows(split_paths, runtime_root)
+    fixed_split_names = sorted(
+        {str(value).strip() for value in fixed_rows.get("split", pd.Series(dtype=str))}
+    )
+    metric_evidence_context = {
+        "run_id": str(run_cfg.get("name") or DEFAULT_RUN_ID),
+        "fixed_split": "+".join(fixed_split_names),
+        "fixed_manifest_row_ids": sorted(
+            str(value).strip()
+            for value in fixed_rows.get("manifest_row_id", pd.Series(dtype=str))
+        ),
+    }
     train_rows = _split_rows(split_paths, runtime_root, "train")
     train_npy_root = _runtime_path(
         runtime_root,
@@ -1953,6 +2098,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         fixed_rows=fixed_rows,
         output_dir=paths["evaluation_dir"],
     )
+    baseline_outputs.update(metric_evidence_context)
     baseline_plan = _baseline_execution_plan(fixed_rows=fixed_rows, config=config)
     baseline_eval_cfg = _mapping(config, "baseline_evaluation")
     external_allowed = bool(baseline_eval_cfg.get("external_baselines", True))
@@ -1976,6 +2122,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
             _runtime_root=runtime_root,
         )
         _emit("PHASE=baseline_evaluation status=completed")
+    external_baselines_summary.update(metric_evidence_context)
     training_command = _training_command_for_config(
         config=config,
         preflight=preflight,
@@ -2106,6 +2253,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         checkpoint_provenance=checkpoint_provenance,
         dry_run=dry_run,
     )
+    finetuned_evaluation.update(metric_evidence_context)
     adoption_gates = _mapping(config, "adoption_gates")
     finetuned_comparison = _build_finetuned_comparison_summary(
         finetuned_evaluation=finetuned_evaluation,
@@ -2114,12 +2262,25 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         adoption_gates=adoption_gates,
     )
     generated_mask_packaging: dict[str, Any] = {"status": "skipped"}
-    if (
+    packaging_requested = bool(outputs.get("package_generated_mask_release", True))
+    packaging_inputs_ready = (
         (not dry_run)
         and str(finetuned_evaluation.get("status", "")) == "completed"
         and int(finetuned_evaluation.get("metric_rows", 0) or 0) > 0
-        and bool(outputs.get("package_generated_mask_release", True))
-    ):
+        and packaging_requested
+    )
+    comparison_eligible = str(finetuned_comparison.get("status", "")) == "completed"
+    if packaging_inputs_ready and not comparison_eligible:
+        generated_mask_packaging = {
+            "status": "skipped_comparison_not_eligible",
+            "reason": str(
+                finetuned_comparison.get(
+                    "reason", "Fine-tuned comparison is not eligible for packaging."
+                )
+            ),
+            "reason_codes": list(finetuned_comparison.get("reason_codes", [])),
+        }
+    elif packaging_inputs_ready and comparison_eligible:
         masks_eval_dir = Path(str(finetuned_evaluation["masks_dir"]))
         family = str(finetuned_evaluation.get("selected_candidate_family", ""))
         threshold = float(finetuned_evaluation.get("selected_threshold", 0.0))
