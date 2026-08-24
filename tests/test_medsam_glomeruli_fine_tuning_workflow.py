@@ -584,6 +584,10 @@ def test_runtime_relative_path_contract_rejects_unsafe_and_missing_artifacts(
         serialize_runtime_relative_path(
             r'C:\\stale\\runtime\\mask.png', runtime_root=runtime_root
         )
+    assert serialize_runtime_relative_path(
+        r'derived_data\generated_masks\glomeruli\mask.png',
+        runtime_root=runtime_root,
+    ) == 'derived_data/generated_masks/glomeruli/mask.png'
     with pytest.raises(ArtifactProvenanceError, match='traversal'):
         resolve_runtime_relative_path('../outside.png', runtime_root=runtime_root)
     with pytest.raises(ArtifactProvenanceError, match='outside runtime_root'):

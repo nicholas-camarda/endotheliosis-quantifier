@@ -503,13 +503,6 @@ def _load_release_rows(
                 raise BootstrapError(
                     'Generated-mask manifest has unsupported path_encoding'
                 )
-            release_id = str(row.get('mask_release_id') or '').strip()
-            if not release_id:
-                continue
-            group = grouped.setdefault(
-                release_id, {'rows': [], 'generated_count': 0, 'latest_mtime': 0.0}
-            )
-            group['rows'].append(row)
             status = str(row.get('generation_status') or '').strip().lower()
             try:
                 validate_generated_mask_artifact_paths(row, runtime_root=runtime_root)
@@ -536,6 +529,13 @@ def _load_release_rows(
                 raise BootstrapError(
                     f'Invalid generated-mask provenance in {manifest_path}: {exc}'
                 ) from exc
+            release_id = str(row.get('mask_release_id') or '').strip()
+            if not release_id:
+                continue
+            group = grouped.setdefault(
+                release_id, {'rows': [], 'generated_count': 0, 'latest_mtime': 0.0}
+            )
+            group['rows'].append(row)
             if status == 'generated' and mask_path.is_file():
                 group['generated_count'] += 1
                 group['latest_mtime'] = max(

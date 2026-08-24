@@ -38,15 +38,13 @@ def serialize_runtime_relative_path(
     """Encode an in-root runtime path as a portable POSIX relative path."""
     root = _runtime_root(runtime_root)
     raw_value = str(path)
-    if PureWindowsPath(raw_value).is_absolute():
+    raw_path = Path(raw_value).expanduser()
+    if not raw_path.is_absolute() and PureWindowsPath(raw_value).is_absolute():
         raise ArtifactProvenanceError(
             f'Windows absolute paths are not permitted in runtime-relative provenance: {raw_value}'
         )
-    if '\\' in raw_value:
-        raise ArtifactProvenanceError(
-            f'Runtime-relative path must use POSIX separators: {raw_value}'
-        )
-    raw_path = Path(raw_value).expanduser()
+    if '\\' in raw_value and not raw_path.is_absolute():
+        raw_path = Path(*PureWindowsPath(raw_value).parts)
     _reject_traversal(raw_path, value=str(path))
     resolved_path = (
         raw_path.resolve() if raw_path.is_absolute() else (root / raw_path).resolve()

@@ -11,6 +11,7 @@ from eq.labelstudio.bootstrap import (
     CONTAINER_LOCAL_FILES_ROOT,
     BootstrapError,
     LabelStudioApiClient,
+    _load_release_rows,
     _prediction_from_mask,
     build_labelstudio_tasks,
     discover_image_files,
@@ -911,6 +912,22 @@ def test_hybrid_preload_rejects_stale_absolute_release_manifest_paths(tmp_path: 
             config_path=cfg,
             hybrid_mode='enabled',
         )
+
+
+def test_release_rows_validate_paths_before_release_id_filter(tmp_path: Path):
+    manifest = tmp_path / 'manifest.csv'
+    manifest.write_text(
+        '\n'.join(
+            [
+                'schema_version,path_encoding,generated_mask_id,mask_release_id,generated_mask_path,generation_status',
+                'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,,/stale/mask.png,generated',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    with pytest.raises(BootstrapError, match='absolute'):
+        _load_release_rows(manifest, runtime_root=tmp_path / 'runtime')
 
 
 def test_hybrid_pinned_release_requires_preload_enabled(tmp_path: Path):
