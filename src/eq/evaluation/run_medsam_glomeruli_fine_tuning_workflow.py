@@ -19,6 +19,9 @@ import pandas as pd
 import yaml
 from PIL import Image, ImageDraw
 
+from eq.evaluation.medsam_glomeruli_audit import (
+    write_medsam_evaluation_cohort_audit,
+)
 from eq.evaluation.medsam_glomeruli_workflow import (
     _file_hash,
     _runtime_path,
@@ -2208,6 +2211,12 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         ),
     }
     train_rows = _split_rows(split_paths, runtime_root, 'train')
+    audit_rows = pd.concat([train_rows, fixed_rows], ignore_index=True)
+    dataset_split_audit = write_medsam_evaluation_cohort_audit(
+        audit_rows,
+        runtime_root=runtime_root,
+        evaluation_dir=paths['evaluation_dir'],
+    )
     train_npy_root = _runtime_path(
         runtime_root,
         training_cfg.get(
@@ -2429,7 +2438,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
     ) == 'completed' and str(finetuned_comparison.get('adoption_tier', '')) in {
         'oracle_level_preferred',
         'improved_candidate_not_oracle',
-    }
+    } and not bool(dataset_split_audit.get('promotion_blocked', False))
     if packaging_inputs_ready and not comparison_eligible:
         generated_mask_packaging = {
             'status': 'skipped_comparison_not_eligible',
@@ -2549,6 +2558,13 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'split_manifests': split_paths,
         'split_manifest_hashes': split_hashes,
         'generated_splits': generated_splits,
+        'dataset_split_audit': dataset_split_audit,
+        'promotion_status': (
+            'blocked' if dataset_split_audit['promotion_blocked'] else 'pending'
+        ),
+        'promotion_reason_codes': list(
+            dataset_split_audit.get('blocking_reason_codes', [])
+        ),
         'finetuned_evaluation': finetuned_evaluation,
         'finetuned_comparison': finetuned_comparison,
         'generated_mask_packaging': generated_mask_packaging,

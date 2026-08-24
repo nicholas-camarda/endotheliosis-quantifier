@@ -1081,40 +1081,42 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
     expect_release: bool,
 ) -> None:
     runtime_root = tmp_path
-    image_path = runtime_root / 'raw_data/cohorts/demo/images/img.png'
-    mask_path = runtime_root / 'raw_data/cohorts/demo/masks/mask.png'
-    image_path.parent.mkdir(parents=True, exist_ok=True)
-    mask_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(np.zeros((12, 12, 3), dtype=np.uint8)).save(image_path)
-    mask = np.zeros((12, 12), dtype=np.uint8)
-    mask[3:9, 3:9] = 1
-    _write_png(mask_path, mask)
-
-    split_row = {
-        'manifest_row_id': 'row-1',
-        'cohort_id': 'demo',
-        'lane_assignment': 'manual_mask_core',
-        'source_sample_id': 'sample-1',
-        'split_group_id': 'sample-1',
-        'image_path': 'raw_data/cohorts/demo/images/img.png',
-        'mask_path': 'raw_data/cohorts/demo/masks/mask.png',
-        'split': 'train',
-        'selection_rank': 1,
-        'selection_reason': 'test',
-    }
+    split_rows = []
+    for index, split in enumerate(('train', 'validation', 'test'), start=1):
+        image_path = runtime_root / f'raw_data/cohorts/demo/images/img-{split}.png'
+        mask_path = runtime_root / f'raw_data/cohorts/demo/masks/mask-{split}.png'
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(
+            np.full((12, 12, 3), index, dtype=np.uint8)
+        ).save(image_path)
+        mask = np.zeros((12, 12), dtype=np.uint8)
+        mask[2 + index : 8 + index, 3:9] = 1
+        _write_png(mask_path, mask)
+        split_rows.append(
+            {
+                'manifest_row_id': f'row-{split}',
+                'cohort_id': 'demo',
+                'lane_assignment': 'manual_mask_core',
+                'source_sample_id': f'sample-{split}',
+                'split_group_id': f'group-{split}',
+                'image_path': str(image_path.relative_to(runtime_root)),
+                'mask_path': str(mask_path.relative_to(runtime_root)),
+                'split': split,
+                'selection_rank': 1,
+                'selection_reason': 'test',
+            }
+        )
     split_dir = runtime_root / 'splits'
     split_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([split_row]).to_csv(split_dir / 'train.csv', index=False)
-    pd.DataFrame([{**split_row, 'split': 'validation'}]).to_csv(
-        split_dir / 'validation.csv', index=False
-    )
-    pd.DataFrame([{**split_row, 'split': 'test'}]).to_csv(
-        split_dir / 'test.csv', index=False
-    )
+    for split_row in split_rows:
+        pd.DataFrame([split_row]).to_csv(
+            split_dir / f"{split_row['split']}.csv", index=False
+        )
 
     manifest_path = runtime_root / 'raw_data/cohorts/manifest.csv'
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([split_row]).to_csv(manifest_path, index=False)
+    pd.DataFrame(split_rows).to_csv(manifest_path, index=False)
 
     base_checkpoint = runtime_root / 'models/medsam/base.pth'
     base_checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -1713,3 +1715,15 @@ def test_workflow_summary_marks_finetuned_evaluation_skipped_without_supported_c
         summary['finetuned_evaluation']['status']
         == 'skipped_missing_supported_checkpoint'
     )
+    audit_summary = summary['dataset_split_audit']
+    assert audit_summary['row_counts']['by_split'] == {
+        'test': 1,
+        'train': 1,
+        'validation': 1,
+    }
+    assert Path(audit_summary['artifacts']['json']).exists()
+    assert Path(audit_summary['artifacts']['csv']).exists()
+    assert len(audit_summary['audit_sha256']) == 64
+    assert audit_summary['promotion_blocked'] is True
+    assert summary['promotion_status'] == 'blocked'
+    assert 'cross_split_strong_group_leakage' in summary['promotion_reason_codes']
