@@ -1232,6 +1232,26 @@ def test_external_fixed_split_oracle_only_invokes_medsam_batch(
             True,
             id='completed-reliable-improved-candidate',
         ),
+        pytest.param(
+            {
+                'status': 'completed',
+                'reason': '',
+                'reason_codes': [],
+                'failed_gates': [],
+                'adoption_tier': 'oracle_level_preferred',
+                'primary_generated_mask_transition_status': 'oracle_level_preferred',
+                'recommended_generated_mask_source': 'medsam_finetuned_glomeruli',
+                'failure_mode': 'none_detected',
+                'oracle_dice_gap': 0.03,
+                'oracle_level_gates_passed': True,
+                'improves_current_auto': True,
+                'improves_current_segmenter': True,
+                'beats_trivial_baseline': True,
+            },
+            'completed',
+            True,
+            id='completed-reliable-oracle-candidate',
+        ),
     ],
 )
 def test_workflow_summary_packages_only_eligible_completed_inference(
@@ -1435,6 +1455,13 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
             comparison_override['oracle_dice_gap']
         )
     assert summary['generated_mask_packaging']['status'] == expected_packaging_status
+    if comparison_override is not None and comparison_override['adoption_tier'] in {
+        'improved_candidate_not_oracle',
+        'oracle_level_preferred',
+    }:
+        assert summary['promotion_report']['practical_adoption_decision'] == (
+            'package_candidate'
+        )
     if comparison_override is not None and comparison_override['adoption_tier'] == (
         'improved_candidate_not_oracle'
     ):
@@ -1443,9 +1470,6 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
             'promotion_reason_codes'
         ]
         assert summary['promotion_report']['decision'] == 'blocked'
-        assert summary['promotion_report']['practical_adoption_decision'] == (
-            'package_candidate'
-        )
         assert 'scientific_promotion_not_eligible' in summary['promotion_report'][
             'reason_codes'
         ]
@@ -1472,9 +1496,11 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
         release_manifest = pd.read_csv(release_root / 'manifest.csv')
         registry = pd.read_csv(registry_path)
         assert set(release_manifest['adoption_tier']) == {
-            'improved_candidate_not_oracle'
+            str(comparison_override['adoption_tier'])
         }
-        assert set(registry['adoption_tier']) == {'improved_candidate_not_oracle'}
+        assert set(registry['adoption_tier']) == {
+            str(comparison_override['adoption_tier'])
+        }
 
 
 def test_workflow_summary_fails_closed_when_finetuned_inference_is_partial(
