@@ -891,6 +891,81 @@ def _finetuned_metric_aggregate(finetuned_evaluation: dict[str, Any]) -> dict[st
     return {"dice": float(dice.mean()), "jaccard": float(jaccard.mean())}
 
 
+def _unavailable_metric_evidence(
+    *,
+    label: str,
+    reason: str,
+    artifact_path: str = "",
+) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "reason_code": f"{label}_metric_evidence_unavailable",
+        "artifact_path": artifact_path,
+    }
+
+
+def _load_metric_evidence(
+    artifact_path: Any,
+    *,
+    label: str,
+    aggregation: str,
+) -> dict[str, Any]:
+    artifact_text = str(artifact_path or "").strip()
+    if not artifact_text:
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="No metric CSV artifact was selected.",
+        )
+    path = Path(artifact_text)
+    if not path.exists() or not path.is_file():
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Selected metric CSV artifact does not exist.",
+            artifact_path=str(path),
+        )
+    try:
+        frame = pd.read_csv(path)
+    except (OSError, UnicodeDecodeError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Selected metric CSV artifact cannot be read.",
+            artifact_path=str(path),
+        )
+    required_columns = {"dice", "jaccard"}
+    if frame.empty or not required_columns.issubset(frame.columns):
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Selected metric CSV artifact lacks usable Dice/Jaccard rows.",
+            artifact_path=str(path),
+        )
+    metrics = frame[["dice", "jaccard"]].apply(pd.to_numeric, errors="coerce")
+    if metrics.isna().any().any() or not np.isfinite(metrics.to_numpy()).all():
+        return _unavailable_metric_evidence(
+            label=label,
+            reason="Selected metric CSV artifact contains missing or non-finite Dice/Jaccard values.",
+            artifact_path=str(path),
+        )
+    if aggregation == "mean":
+        aggregate = metrics.mean()
+    elif aggregation == "max":
+        aggregate = metrics.max()
+    else:
+        raise ValueError(f"Unsupported metric aggregation: {aggregation}")
+    return {
+        "status": "available",
+        "reason": "",
+        "reason_code": "",
+        "artifact_path": str(path),
+        "sha256": _hash_file(path),
+        "sample_count": int(len(metrics)),
+        "metrics": {
+            "dice": float(aggregate["dice"]),
+            "jaccard": float(aggregate["jaccard"]),
+        },
+    }
+
+
 def _build_finetuned_comparison_summary(
     *,
     finetuned_evaluation: dict[str, Any],
@@ -898,36 +973,107 @@ def _build_finetuned_comparison_summary(
     baseline_outputs: dict[str, Any],
     adoption_gates: dict[str, Any],
 ) -> dict[str, Any]:
+    metric_evidence = {
+        "fine_tuned": _load_metric_evidence(
+            finetuned_evaluation.get("metrics_csv", ""),
+            label="fine_tuned",
+            aggregation="mean",
+        ),
+        "oracle": _load_metric_evidence(
+            external_baselines_summary.get("oracle_medsam_metrics_csv", ""),
+            label="oracle",
+            aggregation="mean",
+        ),
+        "automatic_medsam": _load_metric_evidence(
+            external_baselines_summary.get("automatic_medsam_metrics_csv", ""),
+            label="automatic_medsam",
+            aggregation="mean",
+        ),
+        "current_segmenter": _load_metric_evidence(
+            external_baselines_summary.get("current_segmenter_metrics_csv", ""),
+            label="current_segmenter",
+            aggregation="mean",
+        ),
+        "trivial_baseline": _load_metric_evidence(
+            baseline_outputs.get("trivial_baseline_metric_by_source", ""),
+            label="trivial_baseline",
+            aggregation="max",
+        ),
+    }
+    unavailable = [
+        evidence for evidence in metric_evidence.values()
+        if evidence["status"] != "available"
+    ]
+    finetuned_status = str(finetuned_evaluation.get("status", ""))
+    if finetuned_status != "completed":
+        return {
+            "status": "blocked",
+            "reason": "Fine-tuned inference did not complete.",
+            "reason_codes": ["finetuned_inference_not_completed"],
+            "failed_gates": [
+                {
+                    "gate": "finetuned_inference",
+                    "reason_code": "finetuned_inference_not_completed",
+                    "reason": "Fine-tuned inference did not complete.",
+                }
+            ],
+            "metric_evidence": metric_evidence,
+            "adoption_tier": "blocked",
+            "primary_generated_mask_transition_status": "blocked",
+            "recommended_generated_mask_source": "",
+            "failure_mode": finetuned_status or "finetuned_inference_not_run",
+        }
+    if unavailable:
+        reason_codes = [str(evidence["reason_code"]) for evidence in unavailable]
+        comparison: dict[str, Any] = {
+            "status": "blocked",
+            "reason": "Required metric evidence is unavailable.",
+            "reason_codes": reason_codes,
+            "failed_gates": [
+                {
+                    "gate": "metric_evidence",
+                    "reason_code": str(evidence["reason_code"]),
+                    "reason": str(evidence["reason"]),
+                }
+                for evidence in unavailable
+            ],
+            "metric_evidence": metric_evidence,
+            "adoption_tier": "blocked",
+            "primary_generated_mask_transition_status": "blocked",
+            "recommended_generated_mask_source": "",
+            "failure_mode": "metric_evidence_unavailable",
+        }
+        if (
+            metric_evidence["fine_tuned"]["status"] == "available"
+            and metric_evidence["oracle"]["status"] == "available"
+        ):
+            comparison["oracle_dice_gap"] = max(
+                0.0,
+                metric_evidence["oracle"]["metrics"]["dice"]
+                - metric_evidence["fine_tuned"]["metrics"]["dice"],
+            )
+        return comparison
     comparison = _classify_generated_mask_adoption(
-        fine_tuned_metrics=_finetuned_metric_aggregate(finetuned_evaluation),
-        oracle_metrics=_metric_aggregate(
-            external_baselines_summary.get("oracle_prompt_medsam", {}).get("mean_dice", 0.0),
-            external_baselines_summary.get("oracle_prompt_medsam", {}).get("mean_jaccard", 0.0),
-        ),
-        current_auto_metrics=_metric_aggregate(
-            external_baselines_summary.get("automatic_medsam", {}).get("mean_dice", 0.0),
-            external_baselines_summary.get("automatic_medsam", {}).get("mean_jaccard", 0.0),
-        ),
-        current_segmenter_metrics=_metric_aggregate(
-            external_baselines_summary.get("current_segmenter", {}).get("mean_dice", 0.0),
-            external_baselines_summary.get("current_segmenter", {}).get("mean_jaccard", 0.0),
-        ),
-        trivial_baseline_metrics=_trivial_baseline_aggregate(baseline_outputs),
+        fine_tuned_metrics=metric_evidence["fine_tuned"]["metrics"],
+        oracle_metrics=metric_evidence["oracle"]["metrics"],
+        current_auto_metrics=metric_evidence["automatic_medsam"]["metrics"],
+        current_segmenter_metrics=metric_evidence["current_segmenter"]["metrics"],
+        trivial_baseline_metrics=metric_evidence["trivial_baseline"]["metrics"],
         prompt_failure_count=int(finetuned_evaluation.get("prompt_failure_count", 0) or 0),
         gates=adoption_gates,
         overlay_review_status="passed"
         if str(finetuned_evaluation.get("overlay_review_status", "")) == "passed"
         else "not_run",
     )
-    finetuned_status = str(finetuned_evaluation.get("status", ""))
-    inference_ran = finetuned_status == "completed"
-    if not inference_ran:
-        comparison["adoption_tier"] = "blocked"
-        comparison["primary_generated_mask_transition_status"] = "blocked"
-        comparison["recommended_generated_mask_source"] = ""
-        comparison["failure_mode"] = (
-            finetuned_status if finetuned_status else "finetuned_inference_not_run"
-        )
+    comparison.update(
+        {
+            "status": "completed",
+            "reason": "",
+            "reason_codes": [],
+            "failed_gates": [],
+            "metric_evidence": metric_evidence,
+        }
+    )
     return comparison
 
 

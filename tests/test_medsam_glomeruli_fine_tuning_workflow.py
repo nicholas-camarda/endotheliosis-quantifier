@@ -150,6 +150,76 @@ def test_trivial_baseline_aggregate_fail_closed_for_malformed_csv(tmp_path: Path
     assert aggregate == {"dice": 0.0, "jaccard": 0.0}
 
 
+def test_finetuned_comparison_uses_selected_oracle_metrics_csv_when_external_baselines_skipped(
+    tmp_path: Path,
+) -> None:
+    oracle_metrics_csv = tmp_path / "oracle_metrics.csv"
+    finetuned_metrics_csv = tmp_path / "finetuned_metrics.csv"
+    pd.DataFrame(
+        [{"dice": 0.921631295838860, "jaccard": 0.86}] * 42
+    ).to_csv(oracle_metrics_csv, index=False)
+    pd.DataFrame(
+        [{"dice": 0.815511056209316, "jaccard": 0.72}] * 42
+    ).to_csv(finetuned_metrics_csv, index=False)
+
+    comparison = _build_finetuned_comparison_summary(
+        finetuned_evaluation={
+            "status": "completed",
+            "metrics_csv": str(finetuned_metrics_csv),
+            "overlay_review_status": "passed",
+            "prompt_failure_count": 0,
+        },
+        external_baselines_summary={
+            "status": "skipped_config",
+            "oracle_medsam_metrics_csv": str(oracle_metrics_csv),
+        },
+        baseline_outputs={},
+        adoption_gates={},
+    )
+
+    assert comparison["oracle_dice_gap"] == pytest.approx(0.106120239629544)
+    assert comparison["metric_evidence"]["oracle"]["artifact_path"] == str(
+        oracle_metrics_csv
+    )
+    assert comparison["metric_evidence"]["fine_tuned"]["artifact_path"] == str(
+        finetuned_metrics_csv
+    )
+    assert (
+        comparison["metric_evidence"]["oracle"]["artifact_path"]
+        != comparison["metric_evidence"]["fine_tuned"]["artifact_path"]
+    )
+    assert comparison["metric_evidence"]["oracle"]["sample_count"] == 42
+    assert comparison["metric_evidence"]["fine_tuned"]["sample_count"] == 42
+    assert len(comparison["metric_evidence"]["oracle"]["sha256"]) == 64
+    assert len(comparison["metric_evidence"]["fine_tuned"]["sha256"]) == 64
+
+
+def test_finetuned_comparison_blocks_when_oracle_metric_evidence_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    finetuned_metrics_csv = tmp_path / "finetuned_metrics.csv"
+    pd.DataFrame(
+        [{"dice": 0.815511056209316, "jaccard": 0.72}] * 42
+    ).to_csv(finetuned_metrics_csv, index=False)
+
+    comparison = _build_finetuned_comparison_summary(
+        finetuned_evaluation={
+            "status": "completed",
+            "metrics_csv": str(finetuned_metrics_csv),
+            "overlay_review_status": "passed",
+            "prompt_failure_count": 0,
+        },
+        external_baselines_summary={"status": "skipped_config"},
+        baseline_outputs={},
+        adoption_gates={},
+    )
+
+    assert comparison["adoption_tier"] == "blocked"
+    assert "oracle_metric_evidence_unavailable" in comparison["reason_codes"]
+    assert "oracle_dice_gap" not in comparison
+    assert comparison["metric_evidence"]["oracle"]["status"] == "unavailable"
+
+
 def test_adoption_gate_distinguishes_oracle_level_candidate_and_blocked():
     oracle = _classify_generated_mask_adoption(
         fine_tuned_metrics={"dice": 0.91, "jaccard": 0.84},
@@ -651,15 +721,13 @@ def test_workflow_summary_marks_finetuned_evaluation_completed_when_real_inferen
     assert Path(finetuned["proposal_recall_csv"]).exists()
     assert Path(finetuned["overlays_dir"]).exists()
     assert Path(finetuned["masks_dir"]).exists()
-    assert "oracle_dice_gap" in comparison
+    assert "oracle_dice_gap" not in comparison
     assert "adoption_tier" in comparison
-    assert "improves_current_auto" in comparison
-    assert "improves_current_segmenter" in comparison
-    assert "beats_trivial_baseline" in comparison
-    assert comparison["improves_current_auto"] is True
-    assert comparison["improves_current_segmenter"] is True
     assert comparison["adoption_tier"] == "blocked"
-    assert comparison["failure_mode"] == "training_quality"
+    assert comparison["status"] == "blocked"
+    assert comparison["failure_mode"] == "metric_evidence_unavailable"
+    assert "oracle_metric_evidence_unavailable" in comparison["reason_codes"]
+    assert comparison["failed_gates"]
 
 
 def test_workflow_summary_fails_closed_when_finetuned_inference_is_partial(
