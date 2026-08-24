@@ -580,6 +580,10 @@ def test_runtime_relative_path_contract_rejects_unsafe_and_missing_artifacts(
         resolve_runtime_relative_path(
             '/stale/runtime/mask.png', runtime_root=runtime_root
         )
+    with pytest.raises(ArtifactProvenanceError, match='Windows absolute'):
+        serialize_runtime_relative_path(
+            r'C:\\stale\\runtime\\mask.png', runtime_root=runtime_root
+        )
     with pytest.raises(ArtifactProvenanceError, match='traversal'):
         resolve_runtime_relative_path('../outside.png', runtime_root=runtime_root)
     with pytest.raises(ArtifactProvenanceError, match='outside runtime_root'):
@@ -684,7 +688,7 @@ def test_release_registry_rejects_missing_file_for_every_required_artifact_path(
 
 
 @pytest.mark.parametrize(
-    'missing_field', ('source_image_path', 'reference_mask_path', 'checkpoint_path')
+    'missing_field', ('source_image_path', 'checkpoint_path')
 )
 def test_generated_mask_release_writer_requires_existing_input_artifacts(
     tmp_path: Path, missing_field: str
@@ -727,6 +731,41 @@ def test_generated_mask_release_writer_requires_existing_input_artifacts(
                 }
             ],
         )
+
+
+def test_generated_mask_release_allows_missing_reference_mask(tmp_path: Path):
+    runtime_root = tmp_path / 'runtime'
+    run_mask = runtime_root / 'run/masks/row-1.png'
+    source_image = runtime_root / 'raw_data/cohorts/demo/images/img.png'
+    checkpoint = runtime_root / 'models/medsam_glomeruli/ckpt-1/model.pth'
+    _write_png(run_mask, np.ones((4, 4), dtype=np.uint8))
+    _write_png(source_image, np.ones((4, 4), dtype=np.uint8))
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b'checkpoint')
+
+    release = _package_generated_mask_release(
+        runtime_root=runtime_root,
+        release_dir=runtime_root
+        / 'derived_data/generated_masks/glomeruli/medsam_finetuned/release-1',
+        mask_release_id='release-1',
+        run_id='run-1',
+        checkpoint_id='ckpt-1',
+        checkpoint_path=checkpoint,
+        proposal_source='transfer',
+        proposal_threshold=0.35,
+        adoption_tier='improved_candidate_not_oracle',
+        generated_masks=[
+            {
+                'source_image_path': str(source_image),
+                'reference_mask_path': '',
+                'generated_mask_path': str(run_mask),
+                'generation_status': 'generated',
+            }
+        ],
+    )
+
+    manifest = pd.read_csv(release['manifest']).fillna('')
+    assert manifest.loc[0, 'reference_mask_path'] == ''
 
 
 def test_preflight_and_provenance_fail_closed_without_success_status(tmp_path: Path):

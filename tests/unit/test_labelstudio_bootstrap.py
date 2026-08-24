@@ -732,11 +732,19 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     relative_release_manifest_path = (
         (mask_dir.parent / 'manifest.csv').relative_to(runtime).as_posix()
     )
+    checkpoint_path = runtime / 'models' / 'medsam' / 'checkpoint.pth'
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_bytes(b'checkpoint')
+    relative_checkpoint_path = checkpoint_path.relative_to(runtime).as_posix()
+    provenance_path = mask_dir.parent / 'provenance.json'
+    relative_provenance_path = provenance_path.relative_to(runtime).as_posix()
+    provenance_path.write_text('{}', encoding='utf-8')
+    manifest_fields = 'schema_version,path_encoding,generated_mask_id,mask_release_id,mask_source,adoption_tier,cohort_id,lane_assignment,source_sample_id,source_image_path,reference_mask_path,generated_mask_path,release_manifest_path,checkpoint_id,checkpoint_path,proposal_source,proposal_threshold,run_id,generation_status,provenance_path'
     (manifest_dir / 'manifest.csv').write_text(
         '\n'.join(
             [
-                'schema_version,path_encoding,generated_mask_id,mask_release_id,mask_source,adoption_tier,cohort_id,lane_assignment,source_sample_id,source_image_path,reference_mask_path,generated_mask_path,release_manifest_path,checkpoint_id,checkpoint_path,proposal_source,proposal_threshold,run_id,generation_status,provenance_path',
-                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask_path},{relative_release_manifest_path},ckpt,,auto,0.2,run,generated,',
+                manifest_fields,
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask_path},{relative_release_manifest_path},ckpt,{relative_checkpoint_path},auto,0.2,run,generated,{relative_provenance_path}',
             ]
         ),
         encoding='utf-8',
@@ -744,9 +752,20 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     (mask_dir.parent / 'manifest.csv').write_text(
         '\n'.join(
             [
-                'schema_version,path_encoding,generated_mask_id,mask_release_id,source_image_path,generated_mask_path,release_manifest_path,generation_status',
-                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{source_image.relative_to(runtime).as_posix()},{relative_mask_path},{relative_release_manifest_path},generated',
+                manifest_fields,
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask_path},{relative_release_manifest_path},ckpt,{relative_checkpoint_path},auto,0.2,run,generated,{relative_provenance_path}',
             ]
+        ),
+        encoding='utf-8',
+    )
+    provenance_path.write_text(
+        json.dumps(
+            {
+                'schema_version': 'eq.medsam.generated-mask-release/1',
+                'path_encoding': 'runtime-relative-posix',
+                'checkpoint_path': relative_checkpoint_path,
+                'manifest_path': relative_release_manifest_path,
+            }
         ),
         encoding='utf-8',
     )
@@ -793,6 +812,8 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
     )
     mask_path = release_dir / 'masks' / 'mask_a.png'
     _write_real_png(mask_path, value=255)
+    source_image = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images' / img.name
+    _write_real_png(source_image)
     registry_path = (
         runtime / 'derived_data' / 'generated_masks' / 'glomeruli' / 'manifest.csv'
     )
@@ -801,12 +822,19 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
     relative_manifest = (
         'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/manifest.csv'
     )
-    fields = 'schema_version,path_encoding,generated_mask_id,mask_release_id,source_image_path,generated_mask_path,release_manifest_path,generation_status'
+    checkpoint_path = runtime / 'models' / 'medsam' / 'checkpoint.pth'
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_bytes(b'checkpoint')
+    relative_checkpoint = checkpoint_path.relative_to(runtime).as_posix()
+    provenance_path = release_dir / 'provenance.json'
+    relative_provenance = provenance_path.relative_to(runtime).as_posix()
+    provenance_path.write_text('{}', encoding='utf-8')
+    fields = 'schema_version,path_encoding,generated_mask_id,mask_release_id,mask_source,adoption_tier,cohort_id,lane_assignment,source_sample_id,source_image_path,reference_mask_path,generated_mask_path,release_manifest_path,checkpoint_id,checkpoint_path,proposal_source,proposal_threshold,run_id,generation_status,provenance_path'
     registry_path.write_text(
         '\n'.join(
             [
                 fields,
-                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{img.relative_to(tmp_path).as_posix()},{relative_mask},{relative_manifest},generated',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
             ]
         ),
         encoding='utf-8',
@@ -815,8 +843,19 @@ def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
         '\n'.join(
             [
                 fields,
-                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{img.relative_to(tmp_path).as_posix()},{relative_mask},{relative_manifest},generated',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask},{relative_manifest},ckpt,{relative_checkpoint},auto,0.2,run,generated,{relative_provenance}',
             ]
+        ),
+        encoding='utf-8',
+    )
+    provenance_path.write_text(
+        json.dumps(
+            {
+                'schema_version': 'eq.medsam.generated-mask-release/1',
+                'path_encoding': 'runtime-relative-posix',
+                'checkpoint_path': relative_checkpoint,
+                'manifest_path': relative_manifest,
+            }
         ),
         encoding='utf-8',
     )

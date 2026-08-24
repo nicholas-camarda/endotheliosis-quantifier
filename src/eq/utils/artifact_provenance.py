@@ -21,7 +21,6 @@ _RELEASE_ROW_PATH_FIELDS = (
 _GENERATED_RELEASE_REQUIRED_PATH_FIELDS = frozenset(
     {
         'source_image_path',
-        'reference_mask_path',
         'generated_mask_path',
         'checkpoint_path',
         'provenance_path',
@@ -38,7 +37,16 @@ def serialize_runtime_relative_path(
 ) -> str:
     """Encode an in-root runtime path as a portable POSIX relative path."""
     root = _runtime_root(runtime_root)
-    raw_path = Path(path).expanduser()
+    raw_value = str(path)
+    if PureWindowsPath(raw_value).is_absolute():
+        raise ArtifactProvenanceError(
+            f'Windows absolute paths are not permitted in runtime-relative provenance: {raw_value}'
+        )
+    if '\\' in raw_value:
+        raise ArtifactProvenanceError(
+            f'Runtime-relative path must use POSIX separators: {raw_value}'
+        )
+    raw_path = Path(raw_value).expanduser()
     _reject_traversal(raw_path, value=str(path))
     resolved_path = (
         raw_path.resolve() if raw_path.is_absolute() else (root / raw_path).resolve()

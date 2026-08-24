@@ -27,6 +27,7 @@ from eq.utils.artifact_provenance import (
     RUNTIME_RELATIVE_POSIX_ENCODING,
     ArtifactProvenanceError,
     resolve_runtime_relative_path,
+    validate_generated_mask_artifact_paths,
 )
 from eq.utils.paths import (
     get_active_runtime_root,
@@ -511,6 +512,7 @@ def _load_release_rows(
             group['rows'].append(row)
             status = str(row.get('generation_status') or '').strip().lower()
             try:
+                validate_generated_mask_artifact_paths(row, runtime_root=runtime_root)
                 mask_path = resolve_runtime_relative_path(
                     str(row.get('generated_mask_path') or ''),
                     runtime_root=runtime_root,

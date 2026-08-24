@@ -1370,11 +1370,6 @@ def _package_generated_mask_release(
             runtime_root=runtime_root,
             artifact_label='source_image_path',
         )
-        _serialize_required_runtime_path(
-            item.get('reference_mask_path', ''),
-            runtime_root=runtime_root,
-            artifact_label='reference_mask_path',
-        )
     masks_dir = release_dir / 'masks'
     masks_dir.mkdir(parents=True, exist_ok=True)
     provenance_path = release_dir / 'provenance.json'
