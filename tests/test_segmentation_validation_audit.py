@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from eq.training.segmentation_validation_audit import (
@@ -553,6 +554,69 @@ def test_documentation_claim_audit_blocks_non_eligible_metric_claim(tmp_path: Pa
     assert audit["promotion_evidence_status"] == PROMOTION_NOT_ELIGIBLE
     assert output_path.exists()
     assert "metric_claim_cites_non_promotion_eligible_report" in output_path.read_text()
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "| AUROC | 0.95 |",
+        "| Balanced accuracy | 0.90 |",
+    ],
+)
+def test_documentation_claim_audit_blocks_named_performance_metrics_without_promotion_evidence(
+    claim: str,
+):
+    audit = documentation_claim_audit(
+        {"README.md": claim},
+        cited_report_status=PROMOTION_AUDIT_MISSING,
+        cited_report_path="/runtime/output/promotion_report.md",
+    )
+
+    assert audit["blocked"] is True
+    assert audit["promotion_evidence_status"] == PROMOTION_NOT_ELIGIBLE
+    assert audit["rows"][0]["reason"] == "metric_claim_cites_non_promotion_eligible_report"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "These results are not external validation and make no clinical readiness claim.",
+        (
+            "It is not a clinical diagnostic device, an autonomous grader, "
+            "or external validation evidence."
+        ),
+        "This is not external validation and not deployment-ready.",
+        "This is not validated and not deployment-ready.",
+        "Without external validation or deployment-ready claims.",
+    ],
+)
+def test_documentation_claim_audit_allows_explicitly_negated_unsupported_claims(claim: str):
+    audit = documentation_claim_audit(
+        {"README.md": claim},
+        cited_report_status=PROMOTION_AUDIT_MISSING,
+    )
+
+    assert audit["blocked"] is False
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "This is not external validation, but it is deployment-ready.",
+        "This is not external validation and it is deployment-ready.",
+        "Without external validation, it is deployment-ready.",
+    ],
+)
+def test_documentation_claim_audit_does_not_hide_unnegated_claim_after_negated_claim(
+    claim: str,
+):
+    audit = documentation_claim_audit(
+        {"README.md": claim},
+        cited_report_status=PROMOTION_AUDIT_MISSING,
+    )
+
+    assert audit["blocked"] is True
+    assert audit["rows"][0]["reason"] == "unsupported_external_or_promotion_language"
 
 
 def test_readme_and_onboarding_do_not_publish_audit_missing_segmentation_metrics():

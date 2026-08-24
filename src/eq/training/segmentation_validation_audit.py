@@ -1293,8 +1293,79 @@ def build_glomeruli_training_provenance(
     }
 
 
-CLAIM_METRIC_RE = re.compile(r"\b(Dice|Jaccard|precision|recall)\b|(?:\d\.\d{2,3})", re.IGNORECASE)
+CLAIM_METRIC_RE = re.compile(
+    r"""
+    \b(?:
+        Dice(?:\s+(?:coefficient|score))?
+        |Jaccard(?:\s+(?:index|score))?
+        |intersection[-\s]+over[-\s]+union
+        |IoU
+        |AUROC
+        |ROC[-\s]?AUC
+        |AUC
+        |area\s+under\s+(?:the\s+)?ROC\s+curve
+        |AUPRC
+        |PR[-\s]?AUC
+        |average\s+precision
+        |balanced[-\s]+accuracy
+        |accuracy
+        |sensitivity
+        |specificity
+        |precision
+        |recall
+        |PPV
+        |NPV
+        |F1(?:[-\s]+score)?
+        |F[-\s]?beta(?:[-\s]+score)?
+        |Matthews\s+correlation\s+coefficient
+        |MCC
+        |Cohen(?:'s)?\s+kappa
+        |Hausdorff(?:\s+distance)?
+        |HD95
+        |surface[-\s]+Dice
+        |Brier(?:\s+score)?
+        |calibration[-\s]+(?:slope|intercept)
+        |expected[-\s]+calibration[-\s]+error
+        |ECE
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 UNSUPPORTED_CLAIM_RE = re.compile(r"\b(external validation|clinical readiness|promoted default|deployment-ready)\b", re.IGNORECASE)
+NEGATION_RE = re.compile(r"\b(?:not|no|never|without)\b", re.IGNORECASE)
+NEGATION_SCOPE_BOUNDARY_RE = re.compile(
+    r"[.;:]|\b(?:but|however|although|yet)\b",
+    re.IGNORECASE,
+)
+INDEPENDENT_CLAUSE_BOUNDARY_RE = re.compile(
+    r"""
+    (?:,\s*|\b(?:and|or)\s+)
+    (?=
+        (?:
+            I|we|you|he|she|it|they|this|that|these|those
+            |(?:the|a|an)\s+[A-Za-z][\w-]*(?:\s+[A-Za-z][\w-]*){0,3}
+        )
+        \s+
+        (?:
+            am|is|are|was|were|be|been|being
+            |has|have|had|does|do|did
+            |will|would|can|could|may|might|must|should
+        )\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def has_unnegated_unsupported_claim(line: str) -> bool:
+    """Return whether any unsupported claim appears outside local negation scope."""
+    for match in UNSUPPORTED_CLAIM_RE.finditer(line):
+        local_prefix = line[max(0, match.start() - 80):match.start()]
+        local_clause = NEGATION_SCOPE_BOUNDARY_RE.split(local_prefix)[-1]
+        local_clause = INDEPENDENT_CLAUSE_BOUNDARY_RE.split(local_clause)[-1]
+        if not NEGATION_RE.search(local_clause):
+            return True
+    return False
 
 
 def classify_claim_text(text: str) -> str:
@@ -1324,7 +1395,7 @@ def documentation_claim_audit(
             if not CLAIM_METRIC_RE.search(line) and not UNSUPPORTED_CLAIM_RE.search(line):
                 continue
             claim_type = classify_claim_text(line)
-            unsupported_language = bool(UNSUPPORTED_CLAIM_RE.search(line))
+            unsupported_language = has_unnegated_unsupported_claim(line)
             has_metric_claim = bool(CLAIM_METRIC_RE.search(line))
             status = PROMOTION_ELIGIBLE
             reason = "ok"
