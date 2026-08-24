@@ -1311,6 +1311,13 @@ def test_workflow_summary_packages_only_eligible_completed_inference(
         assert 'scientific_promotion_not_eligible' in summary[
             'promotion_reason_codes'
         ]
+        assert summary['promotion_report']['decision'] == 'blocked'
+        assert summary['promotion_report']['practical_adoption_decision'] == (
+            'package_candidate'
+        )
+        assert 'scientific_promotion_not_eligible' in summary['promotion_report'][
+            'reason_codes'
+        ]
     release_root = (
         runtime_root
         / 'derived_data/generated_masks/glomeruli/medsam_finetuned/test-run'
@@ -1764,7 +1771,20 @@ def test_workflow_summary_marks_finetuned_evaluation_skipped_without_supported_c
     assert audit_summary['promotion_blocked'] is True
     assert summary['promotion_status'] == 'blocked'
     assert 'cross_split_strong_group_leakage' in summary['promotion_reason_codes']
+    assert summary['promotion_report']['decision'] == 'blocked'
+    assert any(
+        gate['reason_code'] == 'cross_split_strong_group_leakage'
+        for gate in summary['promotion_report']['failed_gates']
+    )
     box_diagnostics = summary['box_diagnostics']
     assert Path(box_diagnostics['artifacts']['csv']).exists()
     assert Path(box_diagnostics['artifacts']['json']).exists()
     assert box_diagnostics['summary']['row_count'] == 2
+    promotion_report = summary['promotion_report']
+    assert Path(summary['promotion_report_path']).exists()
+    assert promotion_report['decision'] == 'blocked'
+    assert promotion_report['evaluation']['run_id'] == 'test-run'
+    assert promotion_report['checkpoint']['checkpoint_id'] == 'test-run'
+    assert promotion_report['dataset_audit']['id'] == audit_summary['audit_sha256']
+    assert promotion_report['box_diagnostics']['artifacts']['sha256']
+    assert 'scientific_promotion_not_eligible' in promotion_report['reason_codes']

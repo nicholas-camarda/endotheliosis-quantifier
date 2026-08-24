@@ -2559,10 +2559,103 @@ def run_medsam_glomeruli_fine_tuning_workflow(
                 'status': 'skipped_no_prediction_masks',
                 'masks_dir': str(masks_eval_dir),
             }
+    checkpoint_hashes = {
+        str(path): _file_hash(Path(str(path)))
+        for path in checkpoint_provenance.get('checkpoint_files', [])
+        if str(path).strip() and Path(str(path)).is_file()
+    }
+    promotion_reason_codes = sorted(
+        {
+            *dataset_split_audit.get('blocking_reason_codes', []),
+            *finetuned_comparison.get('reason_codes', []),
+            *([] if comparison_eligible else ['comparison_not_eligible']),
+            *(
+                []
+                if scientific_promotion_eligible
+                else ['scientific_promotion_not_eligible']
+            ),
+        }
+    )
+    failed_gates = list(finetuned_comparison.get('failed_gates', []))
+    failed_gates.extend(
+        {
+            'gate': 'dataset_split_audit',
+            'reason_code': str(issue.get('reason_code', '')),
+            'reason': 'Dataset/split audit blocked promotion.',
+        }
+        for issue in dataset_split_audit.get('issues', [])
+        if issue.get('reason_code')
+        != 'positive_only_evidence_distribution_limitation'
+    )
+    if not scientific_promotion_eligible:
+        failed_gates.append(
+            {
+                'gate': 'scientific_promotion',
+                'reason_code': 'scientific_promotion_not_eligible',
+                'reason': 'Automatic evidence did not satisfy the scientific promotion contract.',
+            }
+        )
+    base_checkpoint_hash = (
+        _file_hash(Path(str(preflight['base_checkpoint'])))
+        if Path(str(preflight.get('base_checkpoint', ''))).is_file()
+        else ''
+    )
+    evaluation_created_at = datetime.now().isoformat(timespec='seconds')
+    promotion_report = {
+        'schema_version': 'eq.medsam.promotion-report/1',
+        'evaluation': {
+            'run_id': str(run_cfg.get('name') or DEFAULT_RUN_ID),
+            'created_at': evaluation_created_at,
+            'config_path': str(config_path),
+        },
+        'checkpoint': {
+            'checkpoint_id': str(outputs.get('checkpoint_id') or run_cfg.get('name') or ''),
+            'checkpoint_files': list(checkpoint_provenance.get('checkpoint_files', [])),
+            'checkpoint_sha256': checkpoint_hashes,
+            'base_checkpoint': str(preflight.get('base_checkpoint', '')),
+            'base_checkpoint_sha256': base_checkpoint_hash,
+        },
+        'split_manifests': {
+            'ids': {
+                key: f'{key}:{split_hashes.get(key, "")}'
+                for key in sorted(split_paths)
+            },
+            'paths': split_paths,
+            'sha256': split_hashes,
+        },
+        'dataset_audit': {
+            'id': str(dataset_split_audit.get('audit_sha256', '')),
+            'sha256': str(dataset_split_audit.get('audit_sha256', '')),
+            'artifacts': dataset_split_audit.get('artifacts', {}),
+        },
+        'box_diagnostics': box_diagnostics,
+        'preprocessing_prompt_config': {
+            'training_image_size': training_cfg.get('image_size', ''),
+            'tiling': _mapping(config, 'tiling'),
+            'proposal': _mapping(config, 'proposal'),
+            'selected_candidate_family': finetuned_evaluation.get(
+                'selected_candidate_family', ''
+            ),
+            'selected_threshold': finetuned_evaluation.get('selected_threshold'),
+        },
+        'metric_artifacts': finetuned_comparison.get('metric_evidence', {}),
+        'thresholds': adoption_gates,
+        'failed_gates': failed_gates,
+        'reason_codes': promotion_reason_codes,
+        'decision': 'promote' if scientific_promotion_eligible else 'blocked',
+        'practical_adoption_decision': (
+            'package_candidate' if comparison_eligible else 'blocked'
+        ),
+        'generated_mask_packaging': generated_mask_packaging,
+    }
+    promotion_report_path = paths['evaluation_dir'] / 'promotion_report.json'
+    promotion_report_path.write_text(
+        json.dumps(promotion_report, indent=2, sort_keys=True), encoding='utf-8'
+    )
     summary = {
         'workflow': WORKFLOW_ID,
         'run_id': str(run_cfg.get('name') or DEFAULT_RUN_ID),
-        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'created_at': evaluation_created_at,
         'config_path': str(config_path),
         'runtime_root': str(runtime_root),
         'log_path': str(log_context.log_path) if log_context is not None else '',
@@ -2612,18 +2705,9 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'promotion_status': (
             'eligible' if scientific_promotion_eligible else 'blocked'
         ),
-        'promotion_reason_codes': sorted(
-            {
-                *dataset_split_audit.get('blocking_reason_codes', []),
-                *finetuned_comparison.get('reason_codes', []),
-                *([] if comparison_eligible else ['comparison_not_eligible']),
-                *(
-                    []
-                    if scientific_promotion_eligible
-                    else ['scientific_promotion_not_eligible']
-                ),
-            }
-        ),
+        'promotion_report_path': str(promotion_report_path),
+        'promotion_report': promotion_report,
+        'promotion_reason_codes': promotion_reason_codes,
         'finetuned_evaluation': finetuned_evaluation,
         'finetuned_comparison': finetuned_comparison,
         'generated_mask_packaging': generated_mask_packaging,

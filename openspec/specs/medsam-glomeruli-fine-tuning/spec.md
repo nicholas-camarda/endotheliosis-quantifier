@@ -131,3 +131,22 @@ The workflow SHALL distinguish practical generated-mask adoption from scientific
 - **AND** the workflow SHALL set `primary_generated_mask_transition_status` to `blocked`
 - **AND** the workflow SHALL NOT write a reusable generated-mask release unless reliability gates pass and the release is explicitly labeled with a non-preferred candidate or audit adoption tier
 
+### Requirement: Promotion evidence is self-contained and traceable
+The workflow SHALL write a promotion report under the evaluation run root that
+identifies the evaluation run and timestamp, checkpoint ID and hashes, split
+manifest IDs and hashes, dataset-audit ID/hash, automatic-box diagnostic
+artifacts, preprocessing and prompt configuration, automatic/oracle metric
+artifacts, configured thresholds, failed gates, reason codes, and the final
+promotion decision.
+
+#### Scenario: Promotion is blocked
+- **WHEN** metric evidence, split/audit evidence, or scientific promotion gates
+  are unavailable or fail
+- **THEN** the promotion report SHALL set `decision=blocked`, preserve the
+  failed-gate evidence, and SHALL NOT represent practical candidate packaging
+  as scientific promotion
+
+#### Scenario: Promotion evidence is inspected
+- **WHEN** a completed evaluation summary is consumed
+- **THEN** it SHALL reference the same promotion report and the report's
+  artifact IDs/hashes SHALL identify the exact evidence used for the decision
