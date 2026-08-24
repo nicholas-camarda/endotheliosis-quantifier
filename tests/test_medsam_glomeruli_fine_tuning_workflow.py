@@ -13,6 +13,7 @@ from eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow import (
     _build_deterministic_splits,
     _build_finetuned_comparison_summary,
     _classify_generated_mask_adoption,
+    _load_metric_evidence,
     _package_generated_mask_release,
     _preflight_training_dependencies,
     _prepare_medsam_npy_data,
@@ -317,6 +318,97 @@ def test_finetuned_comparison_blocks_shared_oracle_automatic_artifact_and_wrong_
     assert comparison["status"] == "blocked"
     assert "automatic_oracle_metric_artifact_not_distinct" in comparison["reason_codes"]
     assert "automatic_medsam_metric_method_mismatch" in comparison["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "aggregation", "expected_methods"),
+    [
+        pytest.param(
+            [
+                {
+                    "manifest_row_id": "row-1",
+                    "method": "medsam_oracle",
+                    "dice": 0.95,
+                    "jaccard": 0.90,
+                },
+                {
+                    "manifest_row_id": "row-1",
+                    "method": "medsam_oracle",
+                    "dice": 0.05,
+                    "jaccard": 0.03,
+                },
+                {
+                    "manifest_row_id": "row-2",
+                    "method": "medsam_oracle",
+                    "dice": 0.90,
+                    "jaccard": 0.82,
+                },
+            ],
+            "mean",
+            {"medsam_oracle"},
+            id="duplicate-manifest-row-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "manifest_row_id": "row-1",
+                    "method": "trivial_all_background",
+                    "dice": 0.10,
+                    "jaccard": 0.05,
+                },
+                {
+                    "manifest_row_id": "row-1",
+                    "method": "trivial_all_background",
+                    "dice": 0.90,
+                    "jaccard": 0.82,
+                },
+                {
+                    "manifest_row_id": "row-1",
+                    "method": "trivial_all_foreground",
+                    "dice": 0.20,
+                    "jaccard": 0.12,
+                },
+                {
+                    "manifest_row_id": "row-2",
+                    "method": "trivial_all_background",
+                    "dice": 0.10,
+                    "jaccard": 0.05,
+                },
+                {
+                    "manifest_row_id": "row-2",
+                    "method": "trivial_all_foreground",
+                    "dice": 0.20,
+                    "jaccard": 0.12,
+                },
+            ],
+            "max_method_mean",
+            {"trivial_all_background", "trivial_all_foreground"},
+            id="duplicate-method-row-combination",
+        ),
+    ],
+)
+def test_metric_evidence_rejects_duplicate_evaluation_rows(
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+    aggregation: str,
+    expected_methods: set[str],
+) -> None:
+    metrics_csv = tmp_path / "metrics.csv"
+    pd.DataFrame(rows).to_csv(metrics_csv, index=False)
+    provenance = _metric_evidence_context(["row-1", "row-2"])
+
+    evidence = _load_metric_evidence(
+        metrics_csv,
+        label="test_lane",
+        aggregation=aggregation,
+        provenance_source=provenance,
+        expected_provenance=provenance,
+        expected_methods=expected_methods,
+    )
+
+    assert evidence["status"] == "unavailable"
+    assert evidence["reason_code"] == "test_lane_metric_evidence_duplicate_rows"
+    assert "metrics" not in evidence
 
 
 def test_finetuned_comparison_blocks_when_oracle_metric_evidence_is_unavailable(
@@ -674,8 +766,61 @@ def test_external_fixed_split_oracle_only_invokes_medsam_batch(
     assert "oracle_medsam_metrics_csv" in out
 
 
-def test_workflow_summary_marks_finetuned_evaluation_completed_when_real_inference_runs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("comparison_override", "expected_packaging_status", "expect_release"),
+    [
+        pytest.param(
+            None,
+            "skipped_comparison_not_eligible",
+            False,
+            id="blocked-missing-evidence",
+        ),
+        pytest.param(
+            {
+                "status": "completed",
+                "reason": "",
+                "reason_codes": [],
+                "failed_gates": [],
+                "adoption_tier": "blocked",
+                "primary_generated_mask_transition_status": "blocked",
+                "recommended_generated_mask_source": "",
+                "failure_mode": "oracle_gap",
+                "oracle_dice_gap": 0.19,
+            },
+            "skipped_comparison_not_eligible",
+            False,
+            id="completed-blocked-adoption",
+        ),
+        pytest.param(
+            {
+                "status": "completed",
+                "reason": "",
+                "reason_codes": [],
+                "failed_gates": [],
+                "adoption_tier": "improved_candidate_not_oracle",
+                "primary_generated_mask_transition_status": (
+                    "improved_candidate_not_oracle"
+                ),
+                "recommended_generated_mask_source": "",
+                "failure_mode": "oracle_gap",
+                "oracle_dice_gap": 0.08,
+                "oracle_level_gates_passed": False,
+                "improves_current_auto": True,
+                "improves_current_segmenter": True,
+                "beats_trivial_baseline": True,
+            },
+            "completed",
+            True,
+            id="completed-reliable-improved-candidate",
+        ),
+    ],
+)
+def test_workflow_summary_packages_only_eligible_completed_inference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    comparison_override: dict[str, object] | None,
+    expected_packaging_status: str,
+    expect_release: bool,
 ) -> None:
     runtime_root = tmp_path
     image_path = runtime_root / "raw_data/cohorts/demo/images/img.png"
@@ -778,6 +923,11 @@ def test_workflow_summary_marks_finetuned_evaluation_completed_when_real_inferen
         "eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow._training_command_for_config",
         lambda **_kwargs: ["python", "-m", "eq.evaluation.medsam_glomeruli_adapter"],
     )
+    if comparison_override is not None:
+        monkeypatch.setattr(
+            "eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow._build_finetuned_comparison_summary",
+            lambda **_kwargs: comparison_override,
+        )
 
     config_path = runtime_root / "config.yaml"
     config_path.write_text(
@@ -846,19 +996,38 @@ def test_workflow_summary_marks_finetuned_evaluation_completed_when_real_inferen
     assert Path(finetuned["proposal_recall_csv"]).exists()
     assert Path(finetuned["overlays_dir"]).exists()
     assert Path(finetuned["masks_dir"]).exists()
-    assert "oracle_dice_gap" not in comparison
-    assert "adoption_tier" in comparison
-    assert comparison["adoption_tier"] == "blocked"
-    assert comparison["status"] == "blocked"
-    assert comparison["failure_mode"] == "metric_evidence_unavailable"
-    assert "oracle_metric_evidence_unavailable" in comparison["reason_codes"]
-    assert comparison["failed_gates"]
-    assert summary["generated_mask_packaging"]["status"] == "skipped_comparison_not_eligible"
-    assert not (
+    expected_adoption_tier = (
+        "blocked"
+        if comparison_override is None
+        else str(comparison_override["adoption_tier"])
+    )
+    assert comparison["adoption_tier"] == expected_adoption_tier
+    if comparison_override is None:
+        assert "oracle_dice_gap" not in comparison
+        assert comparison["status"] == "blocked"
+        assert comparison["failure_mode"] == "metric_evidence_unavailable"
+        assert "oracle_metric_evidence_unavailable" in comparison["reason_codes"]
+        assert comparison["failed_gates"]
+    else:
+        assert comparison["status"] == "completed"
+        assert comparison["oracle_dice_gap"] == pytest.approx(
+            comparison_override["oracle_dice_gap"]
+        )
+    assert summary["generated_mask_packaging"]["status"] == expected_packaging_status
+    release_root = (
         runtime_root
         / "derived_data/generated_masks/glomeruli/medsam_finetuned/test-run"
-    ).exists()
-    assert not (runtime_root / "derived_data/generated_masks/glomeruli/manifest.csv").exists()
+    )
+    registry_path = runtime_root / "derived_data/generated_masks/glomeruli/manifest.csv"
+    assert release_root.exists() is expect_release
+    assert registry_path.exists() is expect_release
+    if expect_release:
+        release_manifest = pd.read_csv(release_root / "manifest.csv")
+        registry = pd.read_csv(registry_path)
+        assert set(release_manifest["adoption_tier"]) == {
+            "improved_candidate_not_oracle"
+        }
+        assert set(registry["adoption_tier"]) == {"improved_candidate_not_oracle"}
 
 
 def test_workflow_summary_fails_closed_when_finetuned_inference_is_partial(

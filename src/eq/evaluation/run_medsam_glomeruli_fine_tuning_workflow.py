@@ -984,10 +984,28 @@ def _load_metric_evidence(
         )
     artifact_sha256 = _hash_file(path)
     sample_count = int(len(metrics))
-    actual_provenance = _metric_evidence_provenance(provenance_source)
-    artifact_row_ids = sorted(
-        {str(value).strip() for value in frame["manifest_row_id"].tolist()}
+    normalized_frame = frame.assign(
+        manifest_row_id=frame["manifest_row_id"].map(lambda value: str(value).strip()),
+        method=frame["method"].map(lambda value: str(value).strip()),
+        dice=metrics["dice"],
+        jaccard=metrics["jaccard"],
     )
+    if normalized_frame.duplicated(
+        subset=["method", "manifest_row_id"], keep=False
+    ).any():
+        return _unavailable_metric_evidence(
+            label=label,
+            reason=(
+                "Selected metric CSV artifact contains duplicate method and "
+                "manifest-row evidence."
+            ),
+            reason_code=f"{label}_metric_evidence_duplicate_rows",
+            artifact_path=str(path),
+            artifact_sha256=artifact_sha256,
+            sample_count=sample_count,
+        )
+    actual_provenance = _metric_evidence_provenance(provenance_source)
+    artifact_row_ids = sorted(set(normalized_frame["manifest_row_id"].tolist()))
     if (
         expected_provenance is None
         or actual_provenance is None
@@ -1013,7 +1031,7 @@ def _load_metric_evidence(
             artifact_sha256=artifact_sha256,
             sample_count=sample_count,
         )
-    methods = {str(value).strip() for value in frame["method"].tolist()}
+    methods = set(normalized_frame["method"].tolist())
     method_matches = True
     if expected_methods is not None:
         method_matches = methods == expected_methods
@@ -1034,7 +1052,7 @@ def _load_metric_evidence(
         aggregate = metrics.mean()
     elif aggregation == "max_method_mean":
         aggregate = (
-            frame.assign(dice=metrics["dice"], jaccard=metrics["jaccard"])
+            normalized_frame
             .groupby("method", dropna=False)[["dice", "jaccard"]]
             .mean()
             .max()
@@ -2269,7 +2287,11 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         and int(finetuned_evaluation.get("metric_rows", 0) or 0) > 0
         and packaging_requested
     )
-    comparison_eligible = str(finetuned_comparison.get("status", "")) == "completed"
+    comparison_eligible = (
+        str(finetuned_comparison.get("status", "")) == "completed"
+        and str(finetuned_comparison.get("adoption_tier", ""))
+        in {"oracle_level_preferred", "improved_candidate_not_oracle"}
+    )
     if packaging_inputs_ready and not comparison_eligible:
         generated_mask_packaging = {
             "status": "skipped_comparison_not_eligible",
