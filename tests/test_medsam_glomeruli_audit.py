@@ -6,7 +6,14 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from eq.evaluation.medsam_glomeruli_audit import audit_medsam_evaluation_cohort
+from eq.evaluation.medsam_glomeruli_audit import (
+    audit_medsam_evaluation_cohort,
+    box_diagnostics_for_row,
+    box_from_encoder_frame,
+    box_to_encoder_frame,
+    check_box_round_trip,
+    write_medsam_box_diagnostics,
+)
 
 
 def _write_png(path: Path, array: np.ndarray) -> None:
@@ -250,3 +257,248 @@ def test_audit_records_missing_and_outside_runtime_paths(tmp_path: Path) -> None
     } <= reason_codes
     assert audit['promotion_blocked'] is True
     json.dumps(audit)
+
+
+def _diagnostic_metrics() -> tuple[dict[str, float], dict[str, float]]:
+    return (
+        {'dice': 0.81, 'jaccard': 0.70},
+        {'dice': 0.93, 'jaccard': 0.87},
+    )
+
+
+def test_box_diagnostics_reports_perfect_proposal_and_paired_metrics() -> None:
+    gt_mask = np.zeros((10, 10), dtype=np.uint8)
+    gt_mask[2:6, 3:7] = 1
+    automatic_metrics, oracle_metrics = _diagnostic_metrics()
+
+    diagnostics = box_diagnostics_for_row(
+        gt_mask,
+        {'bbox_x0': 3, 'bbox_y0': 2, 'bbox_x1': 7, 'bbox_y1': 6},
+        (10, 10),
+        oracle_metrics,
+        automatic_metrics,
+    )
+
+    assert diagnostics['proposal_status'] == 'valid'
+    assert diagnostics['box_iou'] == pytest.approx(1.0)
+    assert diagnostics['gt_mask_coverage'] == pytest.approx(1.0)
+    assert diagnostics['proposal_to_gt_area_ratio'] == pytest.approx(1.0)
+    assert diagnostics['normalized_center_displacement'] == pytest.approx(0.0)
+    assert diagnostics['automatic_dice'] == pytest.approx(0.81)
+    assert diagnostics['automatic_jaccard'] == pytest.approx(0.70)
+    assert diagnostics['oracle_dice'] == pytest.approx(0.93)
+    assert diagnostics['oracle_jaccard'] == pytest.approx(0.87)
+    json.dumps(diagnostics, allow_nan=False)
+
+
+def test_box_diagnostics_reports_partial_and_rejects_clipped_or_invalid_boxes() -> None:
+    gt_mask = np.zeros((10, 10), dtype=np.uint8)
+    gt_mask[2:6, 3:7] = 1
+    automatic_metrics, oracle_metrics = _diagnostic_metrics()
+
+    partial = box_diagnostics_for_row(
+        gt_mask,
+        {'bbox_x0': 3, 'bbox_y0': 2, 'bbox_x1': 5, 'bbox_y1': 6},
+        (10, 10),
+        oracle_metrics,
+        automatic_metrics,
+    )
+    clipped = box_diagnostics_for_row(
+        gt_mask,
+        {'bbox_x0': -1, 'bbox_y0': 2, 'bbox_x1': 7, 'bbox_y1': 6},
+        (10, 10),
+        oracle_metrics,
+        automatic_metrics,
+    )
+    invalid = box_diagnostics_for_row(
+        gt_mask,
+        {'bbox_x0': 7, 'bbox_y0': 2, 'bbox_x1': 3, 'bbox_y1': 6},
+        (10, 10),
+        oracle_metrics,
+        automatic_metrics,
+    )
+
+    assert partial['proposal_status'] == 'valid'
+    assert partial['box_iou'] == pytest.approx(0.5)
+    assert partial['gt_mask_coverage'] == pytest.approx(0.5)
+    assert partial['proposal_to_gt_area_ratio'] == pytest.approx(0.5)
+    assert partial['normalized_center_displacement'] == pytest.approx(
+        1.0 / np.sqrt(200.0)
+    )
+    for failed in (clipped, invalid):
+        assert failed['proposal_status'] == 'invalid'
+        assert failed['box_iou'] is None
+        assert failed['gt_mask_coverage'] is None
+        assert failed['proposal_to_gt_area_ratio'] is None
+        assert failed['normalized_center_displacement'] is None
+        assert failed['automatic_dice'] == pytest.approx(0.81)
+        assert failed['oracle_dice'] == pytest.approx(0.93)
+
+
+def test_box_diagnostics_keeps_missing_proposal_distinct_from_metric_failure() -> None:
+    gt_mask = np.zeros((10, 10), dtype=np.uint8)
+    gt_mask[2:6, 3:7] = 1
+
+    diagnostics = box_diagnostics_for_row(
+        gt_mask,
+        None,
+        (10, 10),
+        {'dice': 0.93, 'jaccard': 0.87},
+        None,
+    )
+
+    assert diagnostics['proposal_status'] == 'missing'
+    assert diagnostics['automatic_metric_status'] == 'unavailable'
+    assert diagnostics['oracle_metric_status'] == 'available'
+    assert diagnostics['automatic_dice'] is None
+    assert diagnostics['automatic_jaccard'] is None
+    assert diagnostics['oracle_dice'] == pytest.approx(0.93)
+    assert diagnostics['oracle_jaccard'] == pytest.approx(0.87)
+    json.dumps(diagnostics, allow_nan=False)
+
+
+@pytest.mark.parametrize('image_shape', [(1024, 1024), (2448, 2048)])
+def test_box_coordinate_round_trip_preserves_integer_bounds_within_one_pixel(
+    image_shape: tuple[int, int],
+) -> None:
+    height, width = image_shape
+    box = {
+        'bbox_x0': 137,
+        'bbox_y0': 211,
+        'bbox_x1': min(1701, width - 1),
+        'bbox_y1': min(1899, height - 1),
+    }
+
+    encoded = box_to_encoder_frame(box, image_shape, encoder_size=1024)
+    restored = box_from_encoder_frame(encoded, image_shape, encoder_size=1024)
+    invariant = check_box_round_trip(
+        box, image_shape, encoder_size=1024, tolerance=1
+    )
+
+    assert all(
+        abs(restored[key] - box[key]) <= 1
+        for key in ('bbox_x0', 'bbox_y0', 'bbox_x1', 'bbox_y1')
+    )
+    assert invariant['passed'] is True
+    assert invariant['max_integer_pixel_error'] <= 1
+    assert invariant['coordinate_frame'] == 'original_image_pixels_xyxy'
+    assert invariant['encoder_frame'] == 'square_encoder_pixels_xyxy'
+
+
+def test_box_coordinate_helpers_reject_out_of_frame_boxes() -> None:
+    with pytest.raises(ValueError, match='outside image bounds'):
+        box_to_encoder_frame(
+            {'bbox_x0': -1, 'bbox_y0': 2, 'bbox_x1': 7, 'bbox_y1': 6},
+            (10, 10),
+        )
+
+
+def test_box_diagnostics_writer_is_deterministic_and_emits_one_row_per_locked_sample(
+    tmp_path: Path,
+) -> None:
+    mask_a = tmp_path / 'mask-a.png'
+    mask_b = tmp_path / 'mask-b.png'
+    image_a = tmp_path / 'image-a.png'
+    image_b = tmp_path / 'image-b.png'
+    gt_a = np.zeros((10, 10), dtype=np.uint8)
+    gt_a[2:6, 3:7] = 1
+    gt_b = np.zeros((10, 10), dtype=np.uint8)
+    gt_b[1:5, 1:5] = 1
+    _write_png(mask_a, gt_a)
+    _write_png(mask_b, gt_b)
+    _write_png(image_a, np.zeros((10, 10, 3), dtype=np.uint8))
+    _write_png(image_b, np.zeros((10, 10, 3), dtype=np.uint8))
+    fixed_rows = pd.DataFrame(
+        [
+            {
+                'manifest_row_id': 'row-a',
+                'cohort_id': 'demo',
+                'lane_assignment': 'manual_mask_core',
+                'image_path_resolved': str(image_a),
+                'mask_path_resolved': str(mask_a),
+            },
+            {
+                'manifest_row_id': 'row-b',
+                'cohort_id': 'demo',
+                'lane_assignment': 'manual_mask_core',
+                'image_path_resolved': str(image_b),
+                'mask_path_resolved': str(mask_b),
+            },
+        ]
+    )
+    proposal_path = tmp_path / 'proposal_boxes.csv'
+    pd.DataFrame(
+        [
+            {
+                'manifest_row_id': 'row-a',
+                'candidate_family': 'transfer',
+                'threshold': 0.35,
+                'decision': 'generated',
+                'bbox_x0': 3,
+                'bbox_y0': 2,
+                'bbox_x1': 7,
+                'bbox_y1': 6,
+            },
+            {
+                'manifest_row_id': 'row-b',
+                'candidate_family': 'transfer',
+                'threshold': 0.35,
+                'decision': 'rejected',
+                'bbox_x0': '',
+                'bbox_y0': '',
+                'bbox_x1': '',
+                'bbox_y1': '',
+            },
+        ]
+    ).to_csv(proposal_path, index=False)
+    automatic_path = tmp_path / 'automatic_metrics.csv'
+    pd.DataFrame(
+        [
+            {
+                'manifest_row_id': 'row-a',
+                'dice': 0.81,
+                'jaccard': 0.70,
+            }
+        ]
+    ).to_csv(automatic_path, index=False)
+    oracle_path = tmp_path / 'oracle_metrics.csv'
+    pd.DataFrame(
+        [
+            {'manifest_row_id': 'row-a', 'dice': 0.93, 'jaccard': 0.87},
+            {'manifest_row_id': 'row-b', 'dice': 0.90, 'jaccard': 0.82},
+        ]
+    ).to_csv(oracle_path, index=False)
+
+    first = write_medsam_box_diagnostics(
+        fixed_rows,
+        proposal_boxes_path=proposal_path,
+        automatic_metrics_path=automatic_path,
+        oracle_metrics_path=oracle_path,
+        output_dir=tmp_path / 'diagnostics',
+        selected_candidate_family='transfer',
+        selected_threshold=0.35,
+    )
+    csv_bytes = Path(first['artifacts']['csv']).read_bytes()
+    json_bytes = Path(first['artifacts']['json']).read_bytes()
+    second = write_medsam_box_diagnostics(
+        fixed_rows,
+        proposal_boxes_path=proposal_path,
+        automatic_metrics_path=automatic_path,
+        oracle_metrics_path=oracle_path,
+        output_dir=tmp_path / 'diagnostics',
+        selected_candidate_family='transfer',
+        selected_threshold=0.35,
+    )
+
+    rows = pd.read_csv(first['artifacts']['csv']).fillna('')
+    assert rows['manifest_row_id'].tolist() == ['row-a', 'row-b']
+    assert rows.loc[0, 'proposal_status'] == 'valid'
+    assert rows.loc[1, 'proposal_status'] == 'missing'
+    assert rows.loc[0, 'automatic_dice'] == pytest.approx(0.81)
+    assert rows.loc[1, 'automatic_metric_status'] == 'unavailable'
+    assert first['summary']['by_proposal_status'] == {'missing': 1, 'valid': 1}
+    assert first['summary']['by_quality_stratum'] == {'high_iou': 1, 'missing': 1}
+    assert len(first['artifacts']['sha256']) == 64
+    assert csv_bytes == Path(second['artifacts']['csv']).read_bytes()
+    assert json_bytes == Path(second['artifacts']['json']).read_bytes()
+    json.dumps(first, allow_nan=False)

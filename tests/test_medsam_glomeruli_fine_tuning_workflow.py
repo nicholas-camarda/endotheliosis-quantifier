@@ -1764,3 +1764,7 @@ def test_workflow_summary_marks_finetuned_evaluation_skipped_without_supported_c
     assert audit_summary['promotion_blocked'] is True
     assert summary['promotion_status'] == 'blocked'
     assert 'cross_split_strong_group_leakage' in summary['promotion_reason_codes']
+    box_diagnostics = summary['box_diagnostics']
+    assert Path(box_diagnostics['artifacts']['csv']).exists()
+    assert Path(box_diagnostics['artifacts']['json']).exists()
+    assert box_diagnostics['summary']['row_count'] == 2

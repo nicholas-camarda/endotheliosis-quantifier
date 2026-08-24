@@ -20,6 +20,7 @@ import yaml
 from PIL import Image, ImageDraw
 
 from eq.evaluation.medsam_glomeruli_audit import (
+    write_medsam_box_diagnostics,
     write_medsam_evaluation_cohort_audit,
 )
 from eq.evaluation.medsam_glomeruli_workflow import (
@@ -2448,6 +2449,17 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         dry_run=dry_run,
     )
     finetuned_evaluation.update(metric_evidence_context)
+    box_diagnostics = write_medsam_box_diagnostics(
+        fixed_rows,
+        proposal_boxes_path=finetuned_evaluation.get('proposal_boxes_csv', ''),
+        automatic_metrics_path=finetuned_evaluation.get('metrics_csv', ''),
+        oracle_metrics_path=baseline_outputs.get('oracle_medsam_metrics_csv', ''),
+        output_dir=paths['evaluation_dir'],
+        selected_candidate_family=str(
+            finetuned_evaluation.get('selected_candidate_family', '')
+        ),
+        selected_threshold=finetuned_evaluation.get('selected_threshold'),
+    )
     adoption_gates = _mapping(config, 'adoption_gates')
     finetuned_comparison = _build_finetuned_comparison_summary(
         finetuned_evaluation=finetuned_evaluation,
@@ -2594,6 +2606,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'split_manifest_hashes': split_hashes,
         'generated_splits': generated_splits,
         'dataset_split_audit': dataset_split_audit,
+        'box_diagnostics': box_diagnostics,
         'promotion_status': (
             'eligible' if scientific_promotion_eligible else 'blocked'
         ),
