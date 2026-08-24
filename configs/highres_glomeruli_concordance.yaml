@@ -12,7 +12,7 @@ workflow: highres_glomeruli_concordance
 run:
   name: mr_highres_concordance
   runtime_root_env: EQ_RUNTIME_ROOT
-  runtime_root_default: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier
+  runtime_root_default: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime
   python: /Users/ncamarda/mambaforge/envs/eq-mac/bin/python
 
 inputs:
@@ -36,4 +36,3 @@ preprocessing:
 outputs:
   evaluation_dir: output/segmentation_evaluation/highres_glomeruli_concordance/mr_highres_concordance
   predictions_dir: output/predictions/highres_glomeruli_concordance/mr_highres_concordance
-

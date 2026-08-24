@@ -10,7 +10,7 @@ workflow: medsam_manual_glomeruli_comparison
 run:
   name: pilot_medsam_manual_glomeruli_comparison
   runtime_root_env: EQ_RUNTIME_ROOT
-  runtime_root_default: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier
+  runtime_root_default: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime
   python: /Users/ncamarda/mambaforge/envs/eq-mac/bin/python
 
 inputs:
@@ -24,14 +24,14 @@ pilot:
 
 medsam:
   python: /Users/ncamarda/mambaforge/envs/medsam/bin/python
-  repo: /Users/ncamarda/Projects/MedSAM
-  checkpoint: /Users/ncamarda/Projects/MedSAM/work_dir/MedSAM/medsam_vit_b.pth
+  repo: /Users/ncamarda/Workspaces/medsam/source
+  checkpoint: /Users/ncamarda/Workspaces/medsam/runtime/work_dir/MedSAM/medsam_vit_b.pth
   device: cpu
 
 current_segmenter:
   threshold: 0.75
-  transfer_model_path: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/models/segmentation/glomeruli/transfer/glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256/glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256.pkl
-  scratch_model_path: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/models/segmentation/glomeruli/scratch/glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256/glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256.pkl
+  transfer_model_path: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/models/segmentation/glomeruli/transfer/glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256/glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256.pkl
+  scratch_model_path: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/models/segmentation/glomeruli/scratch/glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256/glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256.pkl
 
 tiling:
   tile_size: 512

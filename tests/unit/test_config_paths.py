@@ -3,6 +3,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from eq.data_management.output_manager import OutputManager
+from eq.evaluation.run_medsam_manual_glomeruli_comparison_workflow import (
+    DEFAULT_MEDSAM_CHECKPOINT,
+    DEFAULT_MEDSAM_REPO,
+)
 from eq.utils.config_manager import ConfigManager
 from eq.utils.paths import (
     get_cache_path,
@@ -29,6 +33,10 @@ from eq.utils.paths import (
     get_runtime_segmentation_evaluation_root,
 )
 
+WORKSPACE_RUNTIME_ROOT = (
+    Path.home() / 'Workspaces' / 'endotheliosis-quantifier' / 'runtime'
+)
+
 
 def test_path_helpers_resolve_from_repo_root(monkeypatch):
     monkeypatch.delenv('EQ_DATA_PATH', raising=False)
@@ -41,7 +49,7 @@ def test_path_helpers_resolve_from_repo_root(monkeypatch):
     monkeypatch.delenv('EQ_RUNTIME_OUTPUT_PATH', raising=False)
 
     repo_root = get_repo_root()
-    runtime_root = Path.home() / 'ProjectsRuntime' / repo_root.name
+    runtime_root = WORKSPACE_RUNTIME_ROOT
     expected_raw = runtime_root / 'raw_data'
     expected_derived = runtime_root / 'derived_data'
 
@@ -91,6 +99,37 @@ def test_path_helpers_resolve_from_repo_root(monkeypatch):
         get_runtime_quantification_result_path('lauren_preeclampsia')
         == active_root / 'output/quantification_results/lauren_preeclampsia'
     )
+
+
+def test_medsam_defaults_use_workspace_source_and_runtime():
+    assert DEFAULT_MEDSAM_REPO == '/Users/ncamarda/Workspaces/medsam/source'
+    assert DEFAULT_MEDSAM_CHECKPOINT == (
+        '/Users/ncamarda/Workspaces/medsam/runtime/work_dir/MedSAM/'
+        'medsam_vit_b.pth'
+    )
+
+
+def test_current_contracts_do_not_reference_retired_local_roots():
+    retired_roots = (
+        '/Users/ncamarda/Projects/' + 'endotheliosis_quantifier',
+        '/Users/ncamarda/Projects/' + 'MedSAM',
+        '/Users/ncamarda/ProjectsRuntime/' + 'endotheliosis_quantifier',
+    )
+    excluded_parts = {'.git', '.history', 'archive', 'output'}
+    checked_suffixes = {'.md', '.py', '.sh', '.yaml', '.yml'}
+
+    offenders = []
+    for path in Path('.').rglob('*'):
+        if not path.is_file() or path.suffix not in checked_suffixes:
+            continue
+        if excluded_parts.intersection(path.parts):
+            continue
+        text = path.read_text(encoding='utf-8')
+        for retired_root in retired_roots:
+            if retired_root in text:
+                offenders.append(f'{path}: {retired_root}')
+
+    assert offenders == []
 
 
 def test_path_helpers_prefer_runtime_root_when_present(tmp_path, monkeypatch):

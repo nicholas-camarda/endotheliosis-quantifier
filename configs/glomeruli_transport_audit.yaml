@@ -12,7 +12,7 @@ workflow: glomeruli_transport_audit
 run:
   name: standard_transport_audit
   runtime_root_env: EQ_RUNTIME_ROOT
-  runtime_root_default: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier
+  runtime_root_default: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime
   python: /Users/ncamarda/mambaforge/envs/eq-mac/bin/python
 
 inputs:
@@ -32,4 +32,3 @@ inputs:
 outputs:
   evaluation_dir: output/segmentation_evaluation/glomeruli_transport_audit/standard_transport_audit
   predictions_dir: output/predictions/glomeruli_transport_audit/standard_transport_audit
-

@@ -38,7 +38,7 @@ The review SHALL run a workspace lane that evaluates canonical repo/runtime/clou
 
 #### Scenario: Workspace assessment runs non-mutating first
 - **WHEN** the workspace lane runs
-- **THEN** it SHALL perform a non-mutating assessment of `/Users/ncamarda/Projects/endotheliosis_quantifier`
+- **THEN** it SHALL perform a non-mutating assessment of `/Users/ncamarda/Workspaces/endotheliosis-quantifier/source`
 - **AND** it SHALL write classification, rewrite candidates, move candidates, publish-preview findings, and unresolved questions to `review/workspace-governor-report.md`
 
 #### Scenario: Clutter classification precedes cleanup
@@ -47,7 +47,7 @@ The review SHALL run a workspace lane that evaluates canonical repo/runtime/clou
 
 #### Scenario: Source, runtime, and cloud roots remain separate
 - **WHEN** the workspace lane reviews path ownership
-- **THEN** it SHALL treat `/Users/ncamarda/Projects/endotheliosis_quantifier` as source code, `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier` as runtime working state, and `/Users/ncamarda/Library/CloudStorage/OneDrive-Personal/SideProjects/endotheliosis_quantifier/Analysis` as cloud publish output
+- **THEN** it SHALL treat `/Users/ncamarda/Workspaces/endotheliosis-quantifier/source` as source code, `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime` as runtime working state, and `/Users/ncamarda/Library/CloudStorage/OneDrive-Personal/Project Vault/Research/endotheliosis-quantifier/Analysis` as cloud publish output
 - **AND** it SHALL flag any code, config, docs, or artifacts that create a competing active storage root
 
 ### Requirement: Research review lane
@@ -180,4 +180,3 @@ Repo-wide quality follow-up SHALL include a concrete cleanup pass for FastAI lin
 - **THEN** current workflow docs and historical archive docs are separately reviewed
 - **AND** the review confirms that historical docs are accessible through `docs/HISTORICAL_NOTES.md` or `docs/README.md`
 - **AND** the review confirms that current docs do not present historical FastAI fallback or compatibility material as active workflow guidance
-

@@ -16,7 +16,7 @@ run:
   name: production_glomeruli_candidate_p0_contract_20260425
   seed: 42
   runtime_root_env: EQ_RUNTIME_ROOT
-  runtime_root_default: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier
+  runtime_root_default: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime
   python: /Users/ncamarda/mambaforge/envs/eq-mac/bin/python
   required_env:
     PYTORCH_ENABLE_MPS_FALLBACK: "1"

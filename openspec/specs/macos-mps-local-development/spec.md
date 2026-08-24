@@ -30,11 +30,11 @@ Implementation SHALL certify the `eq-mac` environment before changing direct inf
 - **THEN** implementation stops only for that Metal validation point and asks the user to run the exact normal-terminal command needed to verify MPS behavior
 
 ### Requirement: Data and runtime layout audit
-Implementation SHALL audit the original cloud source, cloud working copy, repository symlinks, and `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier` before treating Mac local development as certified.
+Implementation SHALL audit the original cloud source, cloud working copy, repository symlinks, and `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime` before treating Mac local development as certified.
 
 #### Scenario: Data lineage is inventoried
 - **WHEN** implementation begins runtime certification
-- **THEN** the audit records the apparent original OneDrive source, OneDrive SideProjects working copy, repository symlink targets, ProjectsRuntime working tree, approximate sizes, and their intended roles
+- **THEN** the audit records the Project Vault record tree, repository data references, workspace runtime tree, approximate sizes, and their intended roles
 
 #### Scenario: Directory status report is presented
 - **WHEN** the data/runtime audit is complete
@@ -224,4 +224,3 @@ Mac MPS fallback SHALL be scoped to explicit segmentation training or validation
 - **WHEN** an MPS-backed command completes
 - **THEN** completion SHALL be treated as compatibility evidence only
 - **AND** it SHALL NOT promote a segmentation model without the required validation, background/negative coverage, and non-degenerate prediction review evidence
-

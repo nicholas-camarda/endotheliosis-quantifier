@@ -40,7 +40,7 @@ The workflow SHALL run MedSAM using automatic proposal boxes and label outputs a
 
 #### Scenario: MedSAM automatic inference runs
 - **WHEN** automatic proposal boxes are available for a selected image
-- **THEN** the workflow SHALL run MedSAM using `/Users/ncamarda/mambaforge/envs/medsam/bin/python`, `/Users/ncamarda/Projects/MedSAM`, and `/Users/ncamarda/Projects/MedSAM/work_dir/MedSAM/medsam_vit_b.pth`
+- **THEN** the workflow SHALL run MedSAM using `/Users/ncamarda/mambaforge/envs/medsam/bin/python`, `/Users/ncamarda/Workspaces/medsam/source`, and `/Users/ncamarda/Workspaces/medsam/runtime/work_dir/MedSAM/medsam_vit_b.pth`
 - **AND** it SHALL save one union automatic MedSAM mask per selected image, candidate artifact, and selected proposal threshold under `medsam_auto_masks/`
 - **AND** it SHALL record every prompt, command, checkpoint path, checkpoint hash when readable, device, return code, proposal source, and failure reason in provenance artifacts
 
@@ -142,4 +142,3 @@ The workflow SHALL classify whether failures are due to localization, MedSAM bou
 - **WHEN** proposal recall and automatic MedSAM mask-quality gates pass
 - **THEN** `summary.json` SHALL recommend prompt-based MedSAM automatic generation before fine-tuning
 - **AND** it SHALL NOT recommend fine-tuning as the next step unless a separate downstream review identifies a new failure mode
-

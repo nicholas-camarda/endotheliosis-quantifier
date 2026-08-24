@@ -20,6 +20,9 @@ DEFAULT_DOX_SCORE_WORKBOOK_ENV = "EQ_DOX_SCORE_WORKBOOK"
 DEFAULT_MR_SCORE_WORKBOOK_ENV = "EQ_MR_SCORE_WORKBOOK"
 DEFAULT_MR_IMAGE_ROOT_ENV = "EQ_MR_IMAGE_ROOT"
 DEFAULT_LABEL_STUDIO_MEDSAM_HYBRID_CONFIG_ENV = "EQ_LABEL_STUDIO_MEDSAM_HYBRID_CONFIG"
+DEFAULT_ACTIVE_RUNTIME_ROOT = (
+    Path.home() / "Workspaces" / "endotheliosis-quantifier" / "runtime"
+)
 
 
 def get_repo_root() -> Path:
@@ -63,7 +66,7 @@ def get_active_runtime_root() -> Path:
     if runtime_override:
         return _resolve_repo_path(runtime_override)
 
-    return Path.home() / "ProjectsRuntime" / get_repo_root().name
+    return DEFAULT_ACTIVE_RUNTIME_ROOT
 
 
 def get_output_path() -> Path:

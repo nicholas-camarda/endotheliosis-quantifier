@@ -43,7 +43,7 @@ The first pilot SHALL evaluate MedSAM using oracle bounding-box prompts derived 
 
 #### Scenario: MedSAM inference runs for oracle boxes
 - **WHEN** oracle boxes are available for a selected image
-- **THEN** the workflow SHALL run MedSAM using `/Users/ncamarda/mambaforge/envs/medsam/bin/python`, `/Users/ncamarda/Projects/MedSAM`, and `/Users/ncamarda/Projects/MedSAM/work_dir/MedSAM/medsam_vit_b.pth`
+- **THEN** the workflow SHALL run MedSAM using `/Users/ncamarda/mambaforge/envs/medsam/bin/python`, `/Users/ncamarda/Workspaces/medsam/source`, and `/Users/ncamarda/Workspaces/medsam/runtime/work_dir/MedSAM/medsam_vit_b.pth`
 - **AND** it SHALL save one union MedSAM mask per selected image
 - **AND** it SHALL record every prompt, command, checkpoint path, checkpoint hash when readable, device, return code, and failure reason in provenance artifacts
 

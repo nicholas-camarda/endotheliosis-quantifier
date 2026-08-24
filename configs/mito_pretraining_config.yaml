@@ -23,7 +23,7 @@ run:
   # Runtime root used by the one-command runner. If EQ_RUNTIME_ROOT is not set,
   # the runner uses runtime_root_default.
   runtime_root_env: EQ_RUNTIME_ROOT
-  runtime_root_default: /Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier
+  runtime_root_default: /Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime
 
   # Mac project execution must use eq-mac. Generic eq is not the supported Mac
   # MPS environment for this repo.

@@ -45,18 +45,18 @@ When segmentation training consumes paired image/mask files directly or through 
 Supported segmentation training SHALL preserve existing physical full-image `training/` and `testing/` layouts, while dynamic patching creates the internal train/validation split from the selected training root.
 
 #### Scenario: Mitochondria installed layout is preserved
-- **WHEN** `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/raw_data/mitochondria_data` is inspected after static patch retirement
+- **WHEN** `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/raw_data/mitochondria_data` is inspected after static patch retirement
 - **THEN** `training/images`, `training/masks`, `testing/images`, and `testing/masks` remain active full-image directories
 - **AND** those directories are not merged, renamed, or flattened by this change
 
 #### Scenario: Mitochondria dynamic training uses the training root only
-- **WHEN** mitochondria training is started with `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/raw_data/mitochondria_data/training` as the data root
+- **WHEN** mitochondria training is started with `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/raw_data/mitochondria_data/training` as the data root
 - **THEN** dynamic patching creates the internal train/validation split from that selected `training/` root
 - **AND** the sibling `testing/` root is not silently included in training or validation
 
 #### Scenario: Mitochondria held-out testing is deliberate
 - **WHEN** mitochondria held-out evaluation is run
-- **THEN** it uses `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/raw_data/mitochondria_data/testing` only through an explicit evaluation path
+- **THEN** it uses `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/raw_data/mitochondria_data/testing` only through an explicit evaluation path
 - **AND** held-out testing examples do not affect training-time validation metrics
 
 #### Scenario: Glomeruli curated paired root splits internally
@@ -120,18 +120,18 @@ On powerful Apple Silicon systems using MPS, local segmentation training SHALL u
 Active ProjectsRuntime segmentation training directories SHALL NOT contain static patch directories for supported training.
 
 #### Scenario: Glomeruli runtime data is inspected
-- **WHEN** `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/derived_data/glomeruli_data` is inspected after this change
+- **WHEN** `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/derived_data/glomeruli_data` is inspected after this change
 - **THEN** it is absent from active runtime training locations
 - **AND** glomeruli training uses `raw_data/cohorts` or a direct `raw_data/cohorts/<cohort_id>` image/mask root
 
 #### Scenario: Mitochondria runtime data is inspected
-- **WHEN** `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/derived_data/mitochondria_data` is inspected after this change
+- **WHEN** `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/derived_data/mitochondria_data` is inspected after this change
 - **THEN** it is absent from active runtime training locations
 - **AND** mitochondria training uses `raw_data/mitochondria_data/training`
 
 #### Scenario: Retired static patch data is preserved
 - **WHEN** static patch directories are retired from active runtime locations
-- **THEN** they are moved to a dated directory under `/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/_retired/` and the implementation records moved paths, size, and file count
+- **THEN** they are moved to a dated directory under `/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/_retired/` and the implementation records moved paths, size, and file count
 
 ### Requirement: Supported segmentation artifacts record training provenance
 Supported segmentation model artifacts SHALL record enough provenance to determine whether they were trained with the current full-image dynamic-patching contract.
@@ -691,4 +691,3 @@ MedSAM/SAM fine-tuning completion and generated-mask release creation SHALL NOT 
 - **WHEN** a downstream workflow consumes `derived_data/generated_masks/glomeruli/manifest.csv` or `derived_data/generated_masks/glomeruli/medsam_finetuned/<mask_release_id>/manifest.csv`
 - **THEN** downstream provenance SHALL record `mask_source=medsam_finetuned_glomeruli`, central registry or release manifest path, adoption tier, checkpoint ID, and release provenance path
 - **AND** downstream interpretation SHALL distinguish generated-mask input evidence from manual-reference truth
-

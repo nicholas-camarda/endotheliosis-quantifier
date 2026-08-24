@@ -44,17 +44,17 @@ DEFAULT_RUN_ID = 'pilot_medsam_manual_glomeruli_comparison'
 DEFAULT_OUTPUT_DIR = 'output/segmentation_evaluation/medsam_manual_glomeruli_comparison'
 DEFAULT_MANIFEST_PATH = 'raw_data/cohorts/manifest.csv'
 DEFAULT_MEDSAM_PYTHON = '/Users/ncamarda/mambaforge/envs/medsam/bin/python'
-DEFAULT_MEDSAM_REPO = '/Users/ncamarda/Projects/MedSAM'
+DEFAULT_MEDSAM_REPO = '/Users/ncamarda/Workspaces/medsam/source'
 DEFAULT_MEDSAM_CHECKPOINT = (
-    '/Users/ncamarda/Projects/MedSAM/work_dir/MedSAM/medsam_vit_b.pth'
+    '/Users/ncamarda/Workspaces/medsam/runtime/work_dir/MedSAM/medsam_vit_b.pth'
 )
 DEFAULT_TRANSFER_MODEL = (
-    '/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/models/segmentation/glomeruli/transfer/'
+    '/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/models/segmentation/glomeruli/transfer/'
     'glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256/'
     'glomeruli_candidate_transfer-transfer_loss-custom_s1lr1e-3_s2lr_lrfind_e20_b12_lr1e-3_sz256.pkl'
 )
 DEFAULT_SCRATCH_MODEL = (
-    '/Users/ncamarda/ProjectsRuntime/endotheliosis_quantifier/models/segmentation/glomeruli/scratch/'
+    '/Users/ncamarda/Workspaces/endotheliosis-quantifier/runtime/models/segmentation/glomeruli/scratch/'
     'glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256/'
     'glomeruli_candidate_no_mito_base-scratch_e25_b12_lr1e-3_sz256.pkl'
 )
