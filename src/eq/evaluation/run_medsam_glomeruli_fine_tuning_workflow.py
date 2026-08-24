@@ -2845,8 +2845,10 @@ def run_medsam_glomeruli_fine_tuning_workflow(
     practical_adoption_decision = (
         'package_candidate'
         if str(generated_mask_packaging.get('status', '')) == 'completed'
-        and str(finetuned_comparison.get('adoption_tier', ''))
-        == 'improved_candidate_not_oracle'
+        and str(finetuned_comparison.get('adoption_tier', '')) in {
+            'oracle_level_preferred',
+            'improved_candidate_not_oracle',
+        }
         else (
             'candidate_eligible_not_packaged'
             if comparison_eligible
