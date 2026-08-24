@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 GENERATED_MASK_RELEASE_SCHEMA_VERSION = 'eq.medsam.generated-mask-release/1'
 RUNTIME_RELATIVE_POSIX_ENCODING = 'runtime-relative-posix'
+
+_RELEASE_ROW_PATH_FIELDS = (
+    'source_image_path',
+    'reference_mask_path',
+    'generated_mask_path',
+    'checkpoint_path',
+    'provenance_path',
+    'release_manifest_path',
+)
+_GENERATED_RELEASE_REQUIRED_PATH_FIELDS = frozenset(
+    {
+        'source_image_path',
+        'reference_mask_path',
+        'generated_mask_path',
+        'checkpoint_path',
+        'provenance_path',
+    }
+)
 
 
 class ArtifactProvenanceError(ValueError):
@@ -66,6 +87,71 @@ def resolve_runtime_relative_path(
     if require_exists and not resolved_path.is_file():
         raise ArtifactProvenanceError(f'missing {artifact_label}: {resolved_path}')
     return resolved_path
+
+
+def validate_generated_mask_artifact_paths(
+    record: Mapping[str, Any], *, runtime_root: Path | str
+) -> dict[str, Path]:
+    """Validate every serialized artifact path in one release or registry row."""
+    resolved: dict[str, Path] = {}
+    for field in _RELEASE_ROW_PATH_FIELDS:
+        value = str(record.get(field) or '').strip()
+        if value:
+            resolved[field] = resolve_runtime_relative_path(
+                value,
+                runtime_root=runtime_root,
+                require_exists=True,
+                artifact_label=field,
+            )
+
+    status = str(record.get('generation_status') or '').strip().lower()
+    required_fields = (
+        _GENERATED_RELEASE_REQUIRED_PATH_FIELDS if status == 'generated' else set()
+    )
+    if 'release_manifest_path' in record:
+        required_fields = set(required_fields) | {'release_manifest_path'}
+    missing = sorted(
+        field for field in required_fields if not str(record.get(field) or '').strip()
+    )
+    if missing:
+        raise ArtifactProvenanceError(
+            f'Generated-mask provenance is stale or incomplete; missing path fields: {missing}'
+        )
+
+    provenance_path = resolved.get('provenance_path')
+    if provenance_path is not None:
+        _validate_provenance_document(provenance_path, runtime_root=runtime_root)
+    return resolved
+
+
+def _validate_provenance_document(
+    provenance_path: Path, *, runtime_root: Path | str
+) -> None:
+    try:
+        payload = json.loads(provenance_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactProvenanceError(
+            f'Generated-mask provenance document is unreadable: {provenance_path}'
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ArtifactProvenanceError(
+            f'Generated-mask provenance document must be an object: {provenance_path}'
+        )
+    if payload.get('schema_version') != GENERATED_MASK_RELEASE_SCHEMA_VERSION:
+        raise ArtifactProvenanceError(
+            'Generated-mask provenance document has unsupported schema_version'
+        )
+    if payload.get('path_encoding') != RUNTIME_RELATIVE_POSIX_ENCODING:
+        raise ArtifactProvenanceError(
+            'Generated-mask provenance document has unsupported path_encoding'
+        )
+    for field in ('checkpoint_path', 'manifest_path'):
+        resolve_runtime_relative_path(
+            str(payload.get(field) or ''),
+            runtime_root=runtime_root,
+            require_exists=True,
+            artifact_label=field,
+        )
 
 
 def _runtime_root(runtime_root: Path | str) -> Path:

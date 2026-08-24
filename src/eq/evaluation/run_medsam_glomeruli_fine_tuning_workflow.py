@@ -54,6 +54,7 @@ from eq.utils.artifact_provenance import (
     ArtifactProvenanceError,
     resolve_runtime_relative_path,
     serialize_runtime_relative_path,
+    validate_generated_mask_artifact_paths,
 )
 from eq.utils.execution_logging import current_execution_log_context
 from eq.utils.paths import (
@@ -1360,6 +1361,20 @@ def _package_generated_mask_release(
 ) -> dict[str, Path]:
     runtime_root = Path(runtime_root).expanduser().resolve()
     ensure_not_under_runtime_raw_data(release_dir, runtime_root)
+    checkpoint_path_serialized = _serialize_required_runtime_path(
+        checkpoint_path, runtime_root=runtime_root, artifact_label='checkpoint_path'
+    )
+    for item in generated_masks:
+        _serialize_required_runtime_path(
+            item.get('source_image_path', ''),
+            runtime_root=runtime_root,
+            artifact_label='source_image_path',
+        )
+        _serialize_required_runtime_path(
+            item.get('reference_mask_path', ''),
+            runtime_root=runtime_root,
+            artifact_label='reference_mask_path',
+        )
     masks_dir = release_dir / 'masks'
     masks_dir.mkdir(parents=True, exist_ok=True)
     provenance_path = release_dir / 'provenance.json'
@@ -1392,9 +1407,7 @@ def _package_generated_mask_release(
                     target_mask, runtime_root=runtime_root
                 ),
                 'checkpoint_id': checkpoint_id,
-                'checkpoint_path': serialize_runtime_relative_path(
-                    checkpoint_path, runtime_root=runtime_root
-                ),
+                'checkpoint_path': checkpoint_path_serialized,
                 'proposal_source': proposal_source,
                 'proposal_threshold': float(proposal_threshold),
                 'run_id': run_id,
@@ -1416,9 +1429,7 @@ def _package_generated_mask_release(
         'adoption_tier': adoption_tier,
         'run_id': run_id,
         'checkpoint_id': checkpoint_id,
-        'checkpoint_path': serialize_runtime_relative_path(
-            checkpoint_path, runtime_root=runtime_root
-        ),
+        'checkpoint_path': checkpoint_path_serialized,
         'proposal_source': proposal_source,
         'proposal_threshold': float(proposal_threshold),
         'manifest_path': serialize_runtime_relative_path(
@@ -1426,6 +1437,10 @@ def _package_generated_mask_release(
         ),
     }
     provenance_path.write_text(json.dumps(provenance, indent=2), encoding='utf-8')
+    _validate_release_manifest_paths(
+        pd.DataFrame(rows, columns=_release_manifest_fields()),
+        runtime_root=runtime_root,
+    )
     (release_dir / 'INDEX.md').write_text(
         '\n'.join(
             [
@@ -1454,6 +1469,19 @@ def _serialize_optional_runtime_path(value: Any, *, runtime_root: Path) -> str:
         if str(value or '').strip()
         else ''
     )
+
+
+def _serialize_required_runtime_path(
+    value: Any, *, runtime_root: Path, artifact_label: str
+) -> str:
+    encoded = serialize_runtime_relative_path(str(value), runtime_root=runtime_root)
+    resolve_runtime_relative_path(
+        encoded,
+        runtime_root=runtime_root,
+        require_exists=True,
+        artifact_label=artifact_label,
+    )
+    return encoded
 
 
 def _update_generated_mask_registry(
@@ -1516,23 +1544,7 @@ def _validate_release_manifest_paths(
             raise ArtifactProvenanceError(
                 'Generated-mask manifest has unsupported path_encoding'
             )
-        if str(row.get('generation_status') or '').lower() == 'generated':
-            resolve_runtime_relative_path(
-                str(row['generated_mask_path']),
-                runtime_root=runtime_root,
-                require_exists=True,
-                artifact_label='generated artifact',
-            )
-        if (
-            'release_manifest_path' in frame.columns
-            and str(row.get('release_manifest_path') or '').strip()
-        ):
-            resolve_runtime_relative_path(
-                str(row['release_manifest_path']),
-                runtime_root=runtime_root,
-                require_exists=True,
-                artifact_label='release manifest',
-            )
+        validate_generated_mask_artifact_paths(row, runtime_root=runtime_root)
 
 
 def _build_checkpoint_provenance(

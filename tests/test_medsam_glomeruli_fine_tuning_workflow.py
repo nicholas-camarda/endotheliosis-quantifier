@@ -22,9 +22,11 @@ from eq.evaluation.run_medsam_glomeruli_fine_tuning_workflow import (
     _training_command_for_config,
     _trivial_baseline_aggregate,
     _update_generated_mask_registry,
+    _validate_release_manifest_paths,
     _validate_split_manifest,
     run_medsam_glomeruli_fine_tuning_workflow,
 )
+from eq.utils.artifact_provenance import ArtifactProvenanceError
 from eq.utils.paths import ensure_not_under_runtime_raw_data
 
 
@@ -590,6 +592,140 @@ def test_runtime_relative_path_contract_rejects_unsafe_and_missing_artifacts(
             runtime_root=runtime_root,
             require_exists=True,
             artifact_label='generated artifact',
+        )
+
+
+_SERIALIZED_RELEASE_PATH_FIELDS = (
+    'source_image_path',
+    'reference_mask_path',
+    'generated_mask_path',
+    'checkpoint_path',
+    'provenance_path',
+    'manifest_path',
+    'release_manifest_path',
+)
+
+
+def _mutate_serialized_release_path(
+    *, release: dict[str, Path], registry: Path, field: str, value: str
+) -> None:
+    if field == 'manifest_path':
+        provenance = json.loads(release['provenance'].read_text(encoding='utf-8'))
+        provenance[field] = value
+        release['provenance'].write_text(
+            json.dumps(provenance, indent=2), encoding='utf-8'
+        )
+        return
+    target = registry if field == 'release_manifest_path' else release['manifest']
+    frame = pd.read_csv(target).fillna('')
+    frame.loc[0, field] = value
+    frame.to_csv(target, index=False)
+
+
+@pytest.mark.parametrize('field', _SERIALIZED_RELEASE_PATH_FIELDS)
+@pytest.mark.parametrize(
+    ('unsafe_kind', 'expected_error'),
+    (
+        ('absolute', 'absolute'),
+        ('traversal', 'traversal'),
+        ('outside_root', 'outside runtime_root'),
+    ),
+)
+def test_release_registry_rejects_unsafe_encoding_for_every_artifact_path(
+    tmp_path: Path, field: str, unsafe_kind: str, expected_error: str
+):
+    runtime_root = tmp_path / 'runtime'
+    release, registry = _package_portable_release(runtime_root)
+    outside_dir = tmp_path / 'outside'
+    outside_file = outside_dir / 'artifact.bin'
+    outside_file.parent.mkdir(parents=True, exist_ok=True)
+    outside_file.write_bytes(b'artifact')
+    if unsafe_kind == 'absolute':
+        unsafe_value = str(outside_file)
+    elif unsafe_kind == 'traversal':
+        unsafe_value = '../outside/artifact.bin'
+    else:
+        escape = runtime_root / 'escape'
+        escape.symlink_to(outside_dir, target_is_directory=True)
+        unsafe_value = 'escape/artifact.bin'
+    _mutate_serialized_release_path(
+        release=release, registry=registry, field=field, value=unsafe_value
+    )
+
+    with pytest.raises(ArtifactProvenanceError, match=expected_error):
+        _validate_release_manifest_paths(
+            pd.read_csv(
+                registry if field == 'release_manifest_path' else release['manifest']
+            ).fillna(''),
+            runtime_root=runtime_root,
+        )
+
+
+@pytest.mark.parametrize('field', _SERIALIZED_RELEASE_PATH_FIELDS)
+def test_release_registry_rejects_missing_file_for_every_required_artifact_path(
+    tmp_path: Path, field: str
+):
+    runtime_root = tmp_path / 'runtime'
+    release, registry = _package_portable_release(runtime_root)
+    _mutate_serialized_release_path(
+        release=release,
+        registry=registry,
+        field=field,
+        value=f'missing/{field}.bin',
+    )
+
+    with pytest.raises(ArtifactProvenanceError, match='missing'):
+        _validate_release_manifest_paths(
+            pd.read_csv(
+                registry if field == 'release_manifest_path' else release['manifest']
+            ).fillna(''),
+            runtime_root=runtime_root,
+        )
+
+
+@pytest.mark.parametrize(
+    'missing_field', ('source_image_path', 'reference_mask_path', 'checkpoint_path')
+)
+def test_generated_mask_release_writer_requires_existing_input_artifacts(
+    tmp_path: Path, missing_field: str
+):
+    runtime_root = tmp_path / 'runtime'
+    run_mask = runtime_root / 'run/masks/row-1.png'
+    source_image = runtime_root / 'raw_data/cohorts/demo/images/img.png'
+    reference_mask = runtime_root / 'raw_data/cohorts/demo/masks/mask.png'
+    checkpoint = runtime_root / 'models/medsam_glomeruli/ckpt-1/model.pth'
+    _write_png(run_mask, np.ones((4, 4), dtype=np.uint8))
+    _write_png(source_image, np.ones((4, 4), dtype=np.uint8))
+    _write_png(reference_mask, np.ones((4, 4), dtype=np.uint8))
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b'checkpoint')
+    paths = {
+        'source_image_path': source_image,
+        'reference_mask_path': reference_mask,
+        'checkpoint_path': checkpoint,
+    }
+    paths[missing_field].unlink()
+
+    with pytest.raises(ArtifactProvenanceError, match=f'missing {missing_field}'):
+        _package_generated_mask_release(
+            runtime_root=runtime_root,
+            release_dir=runtime_root
+            / 'derived_data/generated_masks/glomeruli/medsam_finetuned/release-1',
+            mask_release_id='release-1',
+            run_id='run-1',
+            checkpoint_id='ckpt-1',
+            checkpoint_path=checkpoint,
+            proposal_source='transfer',
+            proposal_threshold=0.35,
+            adoption_tier='improved_candidate_not_oracle',
+            generated_masks=[
+                {
+                    'source_image_path': str(source_image),
+                    'reference_mask_path': str(reference_mask),
+                    'generated_mask_path': str(run_mask),
+                    'generation_status': 'generated',
+                }
+            ],
         )
 
 
