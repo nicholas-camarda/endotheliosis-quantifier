@@ -163,7 +163,11 @@ def _strongest_group_id(row: pd.Series) -> str:
 
 
 def _admitted_manual_rows(
-    manifest: pd.DataFrame, runtime_root: Path, *, lane_assignments: list[str]
+    manifest: pd.DataFrame,
+    runtime_root: Path,
+    *,
+    lane_assignments: list[str],
+    include_missing_files: bool = False,
 ) -> pd.DataFrame:
     frame = manifest.fillna('').copy()
     eligible = frame[
@@ -178,10 +182,11 @@ def _admitted_manual_rows(
     eligible['mask_path_resolved'] = eligible['mask_path'].map(
         lambda p: str(_runtime_path(runtime_root, p))
     )
-    eligible = eligible[
-        eligible['image_path_resolved'].map(lambda p: Path(p).exists())
-        & eligible['mask_path_resolved'].map(lambda p: Path(p).exists())
-    ].copy()
+    if not include_missing_files:
+        eligible = eligible[
+            eligible['image_path_resolved'].map(lambda p: Path(p).exists())
+            & eligible['mask_path_resolved'].map(lambda p: Path(p).exists())
+        ].copy()
     eligible['split_group_id'] = eligible.apply(_strongest_group_id, axis=1)
     eligible = eligible.sort_values(
         ['cohort_id', 'split_group_id', 'manifest_row_id'], kind='mergesort'
@@ -247,7 +252,9 @@ def _write_split_manifests(
     return paths
 
 
-def _validate_split_manifest(path: Path, runtime_root: Path) -> str:
+def _validate_split_manifest(
+    path: Path, runtime_root: Path, *, expected_split: str | None = None
+) -> str:
     if not path.exists():
         raise FileNotFoundError(f'Configured split manifest does not exist: {path}')
     frame = pd.read_csv(path).fillna('')
@@ -256,6 +263,12 @@ def _validate_split_manifest(path: Path, runtime_root: Path) -> str:
     ]
     if missing:
         raise ValueError(f'Split manifest is missing required fields {missing}: {path}')
+    if frame.empty:
+        raise ValueError(f'Split manifest must not be empty: {path}')
+    if expected_split is not None and set(frame['split'].astype(str)) != {expected_split}:
+        raise ValueError(
+            f'Split manifest contains invalid split labels for {expected_split}: {path}'
+        )
     for record in frame.to_dict(orient='records'):
         image_path = _runtime_path(runtime_root, record['image_path'])
         mask_path = _runtime_path(runtime_root, record['mask_path'])
@@ -2159,6 +2172,7 @@ def run_medsam_glomeruli_fine_tuning_workflow(
     generated_splits = False
     split_hashes: dict[str, str] = {}
     split_paths: dict[str, str] = {}
+    audit_extra_rows = pd.DataFrame()
     _emit('PHASE=resolve_splits status=started')
     explicit_train = str(split_cfg.get('train', '')).strip()
     explicit_validation = str(split_cfg.get('validation', '')).strip()
@@ -2170,10 +2184,18 @@ def run_medsam_glomeruli_fine_tuning_workflow(
             ('test', explicit_test),
         ):
             resolved = _runtime_path(runtime_root, raw)
-            split_hashes[key] = _validate_split_manifest(resolved, runtime_root)
+            split_hashes[key] = _validate_split_manifest(
+                resolved, runtime_root, expected_split=key
+            )
             split_paths[key] = str(resolved)
     else:
         manifest = pd.read_csv(manifest_path)
+        admitted_for_audit = _admitted_manual_rows(
+            manifest,
+            runtime_root,
+            lane_assignments=lane_assignments,
+            include_missing_files=True,
+        )
         admitted = _admitted_manual_rows(
             manifest, runtime_root, lane_assignments=lane_assignments
         )
@@ -2186,6 +2208,12 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         for key, manifest_file in manifest_outputs.items():
             split_hashes[key] = _hash_file(manifest_file)
             split_paths[key] = str(manifest_file)
+        valid_ids = set(admitted['manifest_row_id'].astype(str))
+        audit_extra_rows = admitted_for_audit[
+            ~admitted_for_audit['manifest_row_id'].astype(str).isin(valid_ids)
+        ].copy()
+        if not audit_extra_rows.empty:
+            audit_extra_rows['split'] = 'excluded_missing_artifact'
         generated_splits = True
     _emit(
         'PHASE=resolve_splits status=completed generated_splits=%s'
@@ -2211,7 +2239,9 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         ),
     }
     train_rows = _split_rows(split_paths, runtime_root, 'train')
-    audit_rows = pd.concat([train_rows, fixed_rows], ignore_index=True)
+    audit_rows = pd.concat(
+        [train_rows, fixed_rows, audit_extra_rows], ignore_index=True
+    )
     dataset_split_audit = write_medsam_evaluation_cohort_audit(
         audit_rows,
         runtime_root=runtime_root,
@@ -2559,11 +2589,13 @@ def run_medsam_glomeruli_fine_tuning_workflow(
         'split_manifest_hashes': split_hashes,
         'generated_splits': generated_splits,
         'dataset_split_audit': dataset_split_audit,
-        'promotion_status': (
-            'blocked' if dataset_split_audit['promotion_blocked'] else 'pending'
-        ),
-        'promotion_reason_codes': list(
-            dataset_split_audit.get('blocking_reason_codes', [])
+        'promotion_status': 'eligible' if comparison_eligible else 'blocked',
+        'promotion_reason_codes': sorted(
+            {
+                *dataset_split_audit.get('blocking_reason_codes', []),
+                *finetuned_comparison.get('reason_codes', []),
+                *([] if comparison_eligible else ['comparison_not_eligible']),
+            }
         ),
         'finetuned_evaluation': finetuned_evaluation,
         'finetuned_comparison': finetuned_comparison,

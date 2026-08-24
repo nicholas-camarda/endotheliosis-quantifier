@@ -146,12 +146,13 @@ def test_audit_marks_positive_only_evidence_as_distribution_limitation(
     tmp_path: Path,
 ) -> None:
     rows = _cohort_fixture(tmp_path)
-    rows = rows[rows['mask_path'].ne('raw/masks/mask-3.png')].reset_index(drop=True)
-    (tmp_path / 'raw/masks/mask-3.png').unlink()
+    positive_mask = np.zeros((5, 5), dtype=np.uint8)
+    positive_mask[0, 0] = 255
+    _write_png(tmp_path / 'raw/masks/mask-3.png', positive_mask)
 
     audit = audit_medsam_evaluation_cohort(rows, tmp_path)
 
-    assert audit['mask_composition']['positive_rows'] == 3
+    assert audit['mask_composition']['positive_rows'] == 4
     assert audit['mask_composition']['background_rows'] == 0
     assert audit['independence_status'] == 'independent_with_distribution_limitation'
     assert any(
@@ -179,7 +180,40 @@ def test_audit_fails_closed_for_cross_split_strong_group_and_source_overlap(
     assert audit['cross_split_overlap']['source_groups']['values'] == ['sample-1']
     assert {
         issue['reason_code'] for issue in audit['issues']
-    } >= {'cross_split_strong_group_leakage', 'cross_split_source_group_leakage'}
+    } >= {
+        'cross_split_strong_group_leakage',
+        'cross_split_source_group_leakage',
+        'cross_split_split_group_leakage',
+    }
+
+
+def test_audit_checks_split_group_even_when_other_grouping_fields_differ(
+    tmp_path: Path,
+) -> None:
+    rows = _cohort_fixture(tmp_path)
+    rows.loc[3, 'subject_id'] = 'subject-5'
+    rows.loc[3, 'source_sample_id'] = 'sample-5'
+    rows.loc[3, 'split_group_id'] = rows.loc[0, 'split_group_id']
+
+    audit = audit_medsam_evaluation_cohort(rows, tmp_path)
+
+    assert audit['promotion_blocked'] is True
+    assert any(
+        issue['reason_code'] == 'cross_split_split_group_leakage'
+        for issue in audit['issues']
+    )
+
+
+def test_audit_rejects_invalid_or_incomplete_split_composition(tmp_path: Path) -> None:
+    rows = _cohort_fixture(tmp_path)
+    rows.loc[3, 'split'] = 'holdout'
+
+    audit = audit_medsam_evaluation_cohort(rows, tmp_path)
+
+    reason_codes = {issue['reason_code'] for issue in audit['issues']}
+    assert {'invalid_split_label', 'missing_required_split'} <= reason_codes
+    assert audit['independence_status'] == 'blocked'
+    assert audit['promotion_blocked'] is True
 
 
 def test_audit_records_missing_and_outside_runtime_paths(tmp_path: Path) -> None:

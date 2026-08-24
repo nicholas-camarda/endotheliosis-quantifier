@@ -14,6 +14,7 @@ from PIL import Image
 
 _STRONG_GROUP_KEYS = ('subject_id', 'specimen_id', 'source_sample_id', 'split_group_id')
 _SOURCE_GROUP_KEYS = ('source_sample_id', 'split_group_id', 'subject_id', 'specimen_id')
+_EXPECTED_SPLITS = frozenset({'train', 'validation', 'test'})
 _ROW_COLUMNS = (
     'manifest_row_id',
     'split',
@@ -119,8 +120,20 @@ def audit_medsam_evaluation_cohort(
         row_id = _text(record.get('manifest_row_id'))
         if not row_id:
             _issue(issues, reason_code='missing_manifest_row_id')
-        if not _text(record.get('split')):
+        split = _text(record.get('split'))
+        if not split:
             _issue(issues, reason_code='missing_split_metadata', row_id=row_id)
+        elif split not in _EXPECTED_SPLITS:
+            _issue(
+                issues,
+                reason_code='invalid_split_label',
+                row_id=row_id,
+                value=split,
+            )
+
+    observed_splits = {_text(record.get('split')) for record in records}
+    for split in sorted(_EXPECTED_SPLITS - observed_splits):
+        _issue(issues, reason_code='missing_required_split', value=split)
 
     strongest_key = next(
         (
@@ -144,6 +157,7 @@ def audit_medsam_evaluation_cohort(
     split_values: dict[str, dict[str, set[str]]] = {
         'strongest_grouping_key': defaultdict(set),
         'source_groups': defaultdict(set),
+        'split_groups': defaultdict(set),
         'images': defaultdict(set),
         'manifest_rows': defaultdict(set),
     }
@@ -257,6 +271,9 @@ def audit_medsam_evaluation_cohort(
                 split_values['strongest_grouping_key'][strongest_value].add(split)
             if source_value:
                 split_values['source_groups'][source_value].add(split)
+            split_group_value = _text(record.get('split_group_id'))
+            if split_group_value:
+                split_values['split_groups'][split_group_value].add(split)
             if image_path is not None:
                 split_values['images'][str(image_path)].add(split)
             if row_id:
@@ -302,6 +319,7 @@ def audit_medsam_evaluation_cohort(
     overlap_reason_codes = {
         'strongest_grouping_key': 'cross_split_strong_group_leakage',
         'source_groups': 'cross_split_source_group_leakage',
+        'split_groups': 'cross_split_split_group_leakage',
         'images': 'cross_split_image_leakage',
         'manifest_rows': 'cross_split_manifest_row_leakage',
     }
