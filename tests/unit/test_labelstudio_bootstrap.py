@@ -724,13 +724,19 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     mask_dir.mkdir(parents=True, exist_ok=True)
     mask_path = mask_dir / 'mask_a.png'
     Image.new('L', (2, 2), color=255).save(mask_path)
+    source_image = runtime / 'raw_data' / 'cohorts' / 'demo' / 'images' / img.name
+    _write_image(source_image)
     manifest_dir = runtime / 'derived_data' / 'generated_masks' / 'glomeruli'
     manifest_dir.mkdir(parents=True, exist_ok=True)
+    relative_mask_path = mask_path.relative_to(runtime).as_posix()
+    relative_release_manifest_path = (
+        (mask_dir.parent / 'manifest.csv').relative_to(runtime).as_posix()
+    )
     (manifest_dir / 'manifest.csv').write_text(
         '\n'.join(
             [
-                'generated_mask_id,mask_release_id,mask_source,adoption_tier,cohort_id,lane_assignment,source_sample_id,source_image_path,reference_mask_path,generated_mask_path,release_manifest_path,checkpoint_id,checkpoint_path,proposal_source,proposal_threshold,run_id,generation_status,provenance_path',
-                f'row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{img},,{mask_path},{mask_dir.parent / "manifest.csv"},ckpt,,auto,0.2,run,generated,prov.json',
+                'schema_version,path_encoding,generated_mask_id,mask_release_id,mask_source,adoption_tier,cohort_id,lane_assignment,source_sample_id,source_image_path,reference_mask_path,generated_mask_path,release_manifest_path,checkpoint_id,checkpoint_path,proposal_source,proposal_threshold,run_id,generation_status,provenance_path',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,medsam_finetuned_glomeruli,tier,cohort,lane,sample,{source_image.relative_to(runtime).as_posix()},,{relative_mask_path},{relative_release_manifest_path},ckpt,,auto,0.2,run,generated,',
             ]
         ),
         encoding='utf-8',
@@ -738,8 +744,8 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     (mask_dir.parent / 'manifest.csv').write_text(
         '\n'.join(
             [
-                'generated_mask_id,mask_release_id,source_image_path,generated_mask_path,generation_status',
-                f'row1,release_a,{img},{mask_path},generated',
+                'schema_version,path_encoding,generated_mask_id,mask_release_id,source_image_path,generated_mask_path,release_manifest_path,generation_status',
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{source_image.relative_to(runtime).as_posix()},{relative_mask_path},{relative_release_manifest_path},generated',
             ]
         ),
         encoding='utf-8',
@@ -769,6 +775,103 @@ def test_hybrid_dry_run_includes_preload_predictions(tmp_path: Path):
     assert tasks[0]['data']['preload_prediction_status'] == 'available'
     assert 'predictions' not in tasks[0]
     assert len(tasks[0]['data']['preload_region_lineage']) == 1
+
+
+def test_hybrid_preload_resolves_portable_release_paths_from_runtime_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    images = tmp_path / 'images'
+    img = _write_real_png(images / 'animal_1' / 'a.png')
+    runtime = tmp_path / 'runtime'
+    release_dir = (
+        runtime
+        / 'derived_data'
+        / 'generated_masks'
+        / 'glomeruli'
+        / 'medsam_finetuned'
+        / 'release_a'
+    )
+    mask_path = release_dir / 'masks' / 'mask_a.png'
+    _write_real_png(mask_path, value=255)
+    registry_path = (
+        runtime / 'derived_data' / 'generated_masks' / 'glomeruli' / 'manifest.csv'
+    )
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    relative_mask = 'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/masks/mask_a.png'
+    relative_manifest = (
+        'derived_data/generated_masks/glomeruli/medsam_finetuned/release_a/manifest.csv'
+    )
+    fields = 'schema_version,path_encoding,generated_mask_id,mask_release_id,source_image_path,generated_mask_path,release_manifest_path,generation_status'
+    registry_path.write_text(
+        '\n'.join(
+            [
+                fields,
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{img.relative_to(tmp_path).as_posix()},{relative_mask},{relative_manifest},generated',
+            ]
+        ),
+        encoding='utf-8',
+    )
+    (release_dir / 'manifest.csv').write_text(
+        '\n'.join(
+            [
+                fields,
+                f'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,{img.relative_to(tmp_path).as_posix()},{relative_mask},{relative_manifest},generated',
+            ]
+        ),
+        encoding='utf-8',
+    )
+    cfg = tmp_path / 'hybrid.yaml'
+    cfg.write_text(
+        'hybrid:\n  enabled: true\n  preload_enabled: true\n  selection_mode: latest_valid\n  require_box_assisted_medsam: false\n',
+        encoding='utf-8',
+    )
+    other_cwd = tmp_path / 'another-process-cwd'
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+
+    result = run_bootstrap(
+        images_dir=images,
+        runtime_root=runtime,
+        dry_run=True,
+        config_path=cfg,
+        hybrid_mode='enabled',
+    )
+
+    tasks = json.loads(result.task_manifest_path.read_text(encoding='utf-8'))
+    assert tasks[0]['data']['preload_prediction_status'] == 'available'
+
+
+def test_hybrid_preload_rejects_stale_absolute_release_manifest_paths(tmp_path: Path):
+    images = tmp_path / 'images'
+    _write_real_png(images / 'animal_1' / 'a.png')
+    runtime = tmp_path / 'runtime'
+    registry_path = (
+        runtime / 'derived_data' / 'generated_masks' / 'glomeruli' / 'manifest.csv'
+    )
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        '\n'.join(
+            [
+                'schema_version,path_encoding,generated_mask_id,mask_release_id,generated_mask_path,release_manifest_path,generation_status',
+                'eq.medsam.generated-mask-release/1,runtime-relative-posix,row1,release_a,/stale/mask.png,/stale/manifest.csv,generated',
+            ]
+        ),
+        encoding='utf-8',
+    )
+    cfg = tmp_path / 'hybrid.yaml'
+    cfg.write_text(
+        'hybrid:\n  enabled: true\n  preload_enabled: true\n  mask_release_id: "release_a"\n',
+        encoding='utf-8',
+    )
+
+    with pytest.raises(BootstrapError, match='absolute'):
+        run_bootstrap(
+            images_dir=images,
+            runtime_root=runtime,
+            dry_run=True,
+            config_path=cfg,
+            hybrid_mode='enabled',
+        )
 
 
 def test_hybrid_pinned_release_requires_preload_enabled(tmp_path: Path):

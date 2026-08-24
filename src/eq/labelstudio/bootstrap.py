@@ -22,12 +22,17 @@ import yaml
 from PIL import Image
 
 from eq.labelstudio.brush_rle import mask2rle
+from eq.utils.artifact_provenance import (
+    GENERATED_MASK_RELEASE_SCHEMA_VERSION,
+    RUNTIME_RELATIVE_POSIX_ENCODING,
+    ArtifactProvenanceError,
+    resolve_runtime_relative_path,
+)
 from eq.utils.paths import (
     get_active_runtime_root,
     get_label_studio_medsam_hybrid_config_path,
     get_repo_root,
     get_runtime_generated_masks_glomeruli_manifest_path,
-    get_runtime_medsam_finetuned_release_path,
 )
 
 SUPPORTED_IMAGE_SUFFIXES = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
@@ -442,7 +447,9 @@ def _select_mask_release_id(
                 f'Pinned mask_release_id {pinned_id!r} not found because manifest is missing: {manifest_path}'
             )
         return ''
-    release_rows = _load_release_rows(manifest_path)
+    release_rows = _load_release_rows(
+        manifest_path, runtime_root=_resolved_runtime_root(runtime_root)
+    )
     if pinned_id:
         if pinned_id not in release_rows:
             candidates = ', '.join(sorted(release_rows)[:8])
@@ -465,11 +472,36 @@ def _select_mask_release_id(
     raise BootstrapError(f'Unsupported selection_mode {selection_mode!r}')
 
 
-def _load_release_rows(manifest_path: Path) -> dict[str, dict[str, Any]]:
+def _resolved_runtime_root(runtime_root: Path | None) -> Path:
+    return (
+        Path(runtime_root).expanduser().resolve()
+        if runtime_root is not None
+        else get_active_runtime_root().resolve()
+    )
+
+
+def _load_release_rows(
+    manifest_path: Path, *, runtime_root: Path
+) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     with manifest_path.open('r', encoding='utf-8', newline='') as handle:
         reader = csv.DictReader(handle)
+        required_fields = {'schema_version', 'path_encoding', 'generated_mask_path'}
+        missing_fields = required_fields.difference(reader.fieldnames or [])
+        if missing_fields:
+            raise BootstrapError(
+                'Generated-mask manifest is stale or incomplete; missing columns: '
+                f'{sorted(missing_fields)}'
+            )
         for row in reader:
+            if row.get('schema_version') != GENERATED_MASK_RELEASE_SCHEMA_VERSION:
+                raise BootstrapError(
+                    'Generated-mask manifest has unsupported schema_version'
+                )
+            if row.get('path_encoding') != RUNTIME_RELATIVE_POSIX_ENCODING:
+                raise BootstrapError(
+                    'Generated-mask manifest has unsupported path_encoding'
+                )
             release_id = str(row.get('mask_release_id') or '').strip()
             if not release_id:
                 continue
@@ -478,8 +510,31 @@ def _load_release_rows(manifest_path: Path) -> dict[str, dict[str, Any]]:
             )
             group['rows'].append(row)
             status = str(row.get('generation_status') or '').strip().lower()
-            mask_path = Path(str(row.get('generated_mask_path') or '')).expanduser()
-            if status == 'generated' and mask_path.exists():
+            try:
+                mask_path = resolve_runtime_relative_path(
+                    str(row.get('generated_mask_path') or ''),
+                    runtime_root=runtime_root,
+                    require_exists=status == 'generated',
+                    artifact_label='generated artifact',
+                )
+                row['_resolved_generated_mask_path'] = str(mask_path)
+                release_manifest_value = str(
+                    row.get('release_manifest_path') or ''
+                ).strip()
+                if release_manifest_value:
+                    row['_resolved_release_manifest_path'] = str(
+                        resolve_runtime_relative_path(
+                            release_manifest_value,
+                            runtime_root=runtime_root,
+                            require_exists=True,
+                            artifact_label='release manifest',
+                        )
+                    )
+            except ArtifactProvenanceError as exc:
+                raise BootstrapError(
+                    f'Invalid generated-mask provenance in {manifest_path}: {exc}'
+                ) from exc
+            if status == 'generated' and mask_path.is_file():
                 group['generated_count'] += 1
                 group['latest_mtime'] = max(
                     group['latest_mtime'], mask_path.stat().st_mtime
@@ -497,11 +552,24 @@ def _build_prediction_payloads(
         if plan.runtime_root.name == 'labelstudio'
         else plan.runtime_root
     )
-    release_dir = get_runtime_medsam_finetuned_release_path(
-        plan.selected_mask_release_id, runtime_root
-    )
-    release_manifest_path = release_dir / 'manifest.csv'
-    if not release_manifest_path.exists():
+    registry_path = get_runtime_generated_masks_glomeruli_manifest_path(runtime_root)
+    registry_rows = _load_release_rows(registry_path, runtime_root=runtime_root)
+    release_group = registry_rows.get(plan.selected_mask_release_id)
+    if release_group is None:
+        return {}
+    release_manifest_paths = {
+        str(row.get('_resolved_release_manifest_path') or '')
+        for row in release_group['rows']
+        if str(row.get('_resolved_release_manifest_path') or '')
+    }
+    if len(release_manifest_paths) != 1:
+        raise BootstrapError(
+            f'Mask release {plan.selected_mask_release_id!r} must declare one release_manifest_path'
+        )
+    release_manifest_path = Path(release_manifest_paths.pop())
+    release_rows = _load_release_rows(release_manifest_path, runtime_root=runtime_root)
+    release_group = release_rows.get(plan.selected_mask_release_id)
+    if release_group is None:
         return {}
 
     by_name: dict[str, Path] = {}
@@ -510,22 +578,20 @@ def _build_prediction_payloads(
         by_name[image_path.name.lower()] = Path(rel)
 
     prediction_by_relative: dict[str, dict[str, Any]] = {}
-    with release_manifest_path.open('r', encoding='utf-8', newline='') as handle:
-        reader = csv.DictReader(handle)
-        for idx, row in enumerate(reader, start=1):
-            source_image = str(row.get('source_image_path') or '')
-            key = Path(source_image).name.lower()
-            if key not in by_name:
-                continue
-            mask_path = Path(str(row.get('generated_mask_path') or '')).expanduser()
-            if not mask_path.exists():
-                continue
-            rel = by_name[key].as_posix()
-            prediction_by_relative[rel] = _prediction_from_mask(
-                prediction_id=f'auto_{idx:05d}',
-                mask_path=mask_path,
-                mask_release_id=plan.selected_mask_release_id,
-            )
+    for idx, row in enumerate(release_group['rows'], start=1):
+        source_image = str(row.get('source_image_path') or '')
+        key = Path(source_image).name.lower()
+        if key not in by_name:
+            continue
+        mask_path = Path(str(row['_resolved_generated_mask_path']))
+        if not mask_path.is_file():
+            continue
+        rel = by_name[key].as_posix()
+        prediction_by_relative[rel] = _prediction_from_mask(
+            prediction_id=f'auto_{idx:05d}',
+            mask_path=mask_path,
+            mask_release_id=plan.selected_mask_release_id,
+        )
     return prediction_by_relative
 
 
