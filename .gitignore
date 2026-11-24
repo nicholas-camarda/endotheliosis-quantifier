@@ -73,3 +73,6 @@ docs/_build/
 .codex/
 AGENTS.md
 .worktrees/
+
+# Claude Code session worktrees
+.claude/worktrees/
