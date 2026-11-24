@@ -76,3 +76,8 @@ AGENTS.md
 
 # Claude Code session worktrees
 .claude/worktrees/
+
+# Workspace files at the repo root (also in the global ignore)
+/runtime/
+/manifest.yaml
+CLAUDE.md
